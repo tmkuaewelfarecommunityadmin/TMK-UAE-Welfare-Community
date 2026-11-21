@@ -22,7 +22,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   externalError,
 }) => {
   const t = translations[lang];
-  const [section, setSection] = useState<'signin' | 'assistance' | 'track'>('signin');
+  const [section, setSection] = useState<'overview' | 'signin' | 'assistance' | 'track'>('overview');
 
   // Sign-In state
   const [username, setUsername] = useState('');
@@ -236,12 +236,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           <nav className="hidden items-center gap-6 text-sm font-medium text-slate-600 md:flex dark:text-slate-300">
             <button
               type="button"
-              onClick={() => setSection('signin')}
+              onClick={() => setSection('overview')}
               className={`whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 dark:hover:text-white ${
-                section === 'signin' ? 'text-emerald-800 underline underline-offset-8 dark:text-emerald-400' : ''
+                section === 'overview' ? 'text-emerald-800 underline underline-offset-8 dark:text-emerald-400' : ''
               }`}
             >
-              {t.signIn}
+              {t.overview}
             </button>
             <button
               type="button"
@@ -271,7 +271,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             </button>
           </nav>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
             <button
               type="button"
               onClick={onToggleLang}
@@ -284,16 +284,28 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             <button
               type="button"
               onClick={() => setSection('assistance')}
-              className="hidden min-h-[40px] items-center rounded-lg bg-emerald-800 px-4 py-2 text-xs font-medium text-white transition hover:bg-emerald-900 sm:inline-flex whitespace-nowrap shrink-0"
+              className={`hidden min-h-[40px] items-center rounded-lg border px-3.5 py-2 text-xs font-medium transition sm:inline-flex whitespace-nowrap shrink-0 ${
+                section === 'assistance'
+                  ? 'border-emerald-800 bg-emerald-50 text-emerald-900 dark:border-emerald-500 dark:bg-emerald-950/60 dark:text-emerald-300'
+                  : 'border-slate-300 bg-white text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700'
+              }`}
             >
               {t.publicAssistance}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSection('signin')}
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-emerald-800 px-4 py-2 text-xs font-medium text-white transition hover:bg-emerald-900 whitespace-nowrap shrink-0"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              <span>{t.signIn}</span>
             </button>
           </div>
         </div>
 
         {/* Mobile Quick Switcher */}
         <div className="flex border-t border-slate-200 px-4 md:hidden dark:border-slate-800">
-          {(['signin', 'assistance', 'track'] as const).map((tab) => (
+          {(['overview', 'assistance', 'track', 'signin'] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -304,74 +316,92 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
-              {tab === 'signin' ? t.signIn : tab === 'assistance' ? t.publicAssistance : t.trackRequest}
+              {tab === 'overview'
+                ? t.overview
+                : tab === 'assistance'
+                  ? t.publicAssistance
+                  : tab === 'track'
+                    ? t.trackRequest
+                    : t.signIn}
             </button>
           ))}
         </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:py-12">
-        {section === 'signin' && (
-          <div className="grid grid-cols-1 items-start gap-10 lg:grid-cols-12">
+        {section === 'overview' && (
+          <div className="mx-auto max-w-5xl space-y-10">
+            {displayedAuthError && (
+              <div
+                role="alert"
+                className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
+              >
+                {displayedAuthError}
+              </div>
+            )}
+
             {/* Editorial Overview */}
-            <div className="lg:col-span-7">
+            <div>
               <p className="text-xs font-medium text-emerald-800 dark:text-emerald-400">
                 Tamil &amp; English · INR &amp; AED Separate Ledgers · Committee Governance
               </p>
-              <h1 className="mt-3 max-w-2xl font-display text-3xl font-bold tracking-tight text-slate-900 [text-wrap:balance] sm:text-4xl dark:text-white">
+              <h1 className="mt-3 max-w-2xl font-display text-3xl font-bold tracking-tight text-slate-900 [text-wrap:balance] sm:text-5xl dark:text-white">
                 {t.appName}
               </h1>
-              <p className="mt-4 max-w-xl text-base leading-relaxed text-slate-600 dark:text-slate-300">
+              <p className="mt-4 max-w-2xl text-base leading-relaxed text-slate-600 dark:text-slate-300">
                 {t.appSubtitle}. Built for village members, committee reviewers, treasurers, and
                 auditors with separation of duties, immutable double-entry postings, and monthly UAE
                 remittance settlements.
               </p>
-
-              <div className="mt-8 grid grid-cols-1 gap-6 border-t border-slate-200 pt-8 sm:grid-cols-2 dark:border-slate-800">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Verified Contributions &amp; Separation of Duties
-                  </h2>
-                  <p className="mt-1.5 text-sm text-slate-600 dark:text-slate-400">
-                    Member payment submissions and collector entries require independent committee
-                    approval before updating ledger balances.
-                  </p>
-                </div>
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Committee Assistance Thresholds
-                  </h2>
-                  <p className="mt-1.5 text-sm text-slate-600 dark:text-slate-400">
-                    Normal assistance requires 50% approval from frozen eligible committee voters;
-                    emergency cases resolve with 1 verified approval before Treasurer payout.
-                  </p>
-                </div>
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Monthly UAE AED-to-INR Settlement
-                  </h2>
-                  <p className="mt-1.5 text-sm text-slate-600 dark:text-slate-400">
-                    INR and AED accounts are reconciled separately. Monthly AED transfers convert
-                    without double-counting contribution income.
-                  </p>
-                </div>
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Append-Only Role-Snapshot Audit
-                  </h2>
-                  <p className="mt-1.5 text-sm text-slate-600 dark:text-slate-400">
-                    Every approval, payout, settlement, and member edit preserves actor identity
-                    and historical role snapshot at the time of action.
-                  </p>
-                </div>
-              </div>
             </div>
 
-            {/* Sign-In Card */}
-            <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8 lg:col-span-5 dark:border-slate-800 dark:bg-slate-900">
+            <div className="grid grid-cols-1 gap-8 border-t border-slate-200 pt-8 sm:grid-cols-2 dark:border-slate-800">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                  01. Verified Contributions &amp; Separation of Duties
+                </h2>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                  Member payment submissions and collector entries require independent committee
+                  approval before updating ledger balances.
+                </p>
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                  02. Committee Assistance Thresholds
+                </h2>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                  Normal assistance requires 50% approval from frozen eligible committee voters;
+                  emergency cases resolve with 1 verified approval before Treasurer payout.
+                </p>
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                  03. Monthly UAE AED-to-INR Settlement
+                </h2>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                  INR and AED accounts are reconciled separately. Monthly AED transfers convert
+                  without double-counting contribution income.
+                </p>
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                  04. Append-Only Role-Snapshot Audit
+                </h2>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                  Every approval, payout, settlement, and member edit preserves actor identity
+                  and historical role snapshot at the time of action.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {section === 'signin' && (
+          <div className="mx-auto max-w-md">
+            <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8 dark:border-slate-800 dark:bg-slate-900">
               <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-400">
                 <ShieldCheck className="h-5 w-5" />
-                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">{t.signIn}</h2>
+                <h1 className="text-lg font-semibold text-slate-900 dark:text-white">{t.signIn}</h1>
               </div>
               <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
                 Authorized member accounts only. No public self-registration.
