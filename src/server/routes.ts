@@ -524,7 +524,23 @@ export function createApiRouter(): express.Router {
   router.get('/dashboard', requireAuth, async (req: AuthedRequest, res) => {
     try {
       const auth = req.auth!;
-      const month = String(req.query.month || new Date().toISOString().slice(0, 7));
+      const rawMonth = String(req.query.month || '');
+      const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth)
+        ? rawMonth
+        : new Date().toISOString().slice(0, 7);
+
+      const [yearStr, monthStr] = month.split('-');
+      const baseYear = Number(yearStr);
+      const baseMonthIdx = Number(monthStr) - 1;
+      const trendMonths: string[] = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(Date.UTC(baseYear, baseMonthIdx - i, 1));
+        trendMonths.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+      }
+      const firstMonthStart = `${trendMonths[0]}-01`;
+      const selectedMonthLastDay = new Date(Date.UTC(baseYear, baseMonthIdx + 1, 0)).getUTCDate();
+      const selectedMonthStart = `${month}-01`;
+      const selectedMonthEnd = `${month}-${String(selectedMonthLastDay).padStart(2, '0')}`;
 
       const accountBalances = await getAccountBalances(db);
       const inrAssetAccounts = accountBalances.filter(
@@ -595,7 +611,6 @@ export function createApiRouter(): express.Router {
         : [];
 
       // Monthly collections summary (confirmed payments in selected month)
-      const monthPrefix = `${month}%`;
       const monthCollections = await db
         .select({
           currencyCode: paymentSubmissions.currencyCode,
@@ -606,10 +621,41 @@ export function createApiRouter(): express.Router {
         .where(
           and(
             eq(paymentSubmissions.status, 'approved'),
-            sql`${paymentSubmissions.paymentDate} LIKE ${monthPrefix}`
+            gte(paymentSubmissions.paymentDate, selectedMonthStart),
+            lte(paymentSubmissions.paymentDate, selectedMonthEnd)
           )
         )
         .groupBy(paymentSubmissions.currencyCode);
+
+      // 6-month verified contribution trends ending at selected month (INR & AED separated)
+      const trendRows = await db
+        .select({
+          monthKey: sql<string>`SUBSTR(${paymentSubmissions.paymentDate}, 1, 7)`,
+          currencyCode: paymentSubmissions.currencyCode,
+          total: sql<string>`COALESCE(SUM(${paymentSubmissions.amount}), 0)`,
+          count: sql<number>`COUNT(*)::int`,
+        })
+        .from(paymentSubmissions)
+        .where(
+          and(
+            eq(paymentSubmissions.status, 'approved'),
+            gte(paymentSubmissions.paymentDate, firstMonthStart),
+            lte(paymentSubmissions.paymentDate, selectedMonthEnd)
+          )
+        )
+        .groupBy(sql`SUBSTR(${paymentSubmissions.paymentDate}, 1, 7)`, paymentSubmissions.currencyCode);
+
+      const monthlyTrends = trendMonths.map((m) => {
+        const inrRow = trendRows.find((r) => r.monthKey === m && r.currencyCode === 'INR');
+        const aedRow = trendRows.find((r) => r.monthKey === m && r.currencyCode === 'AED');
+        return {
+          month: m,
+          inrTotal: Number(Number(inrRow?.total ?? 0).toFixed(2)),
+          aedTotal: Number(Number(aedRow?.total ?? 0).toFixed(2)),
+          inrCount: inrRow?.count ?? 0,
+          aedCount: aedRow?.count ?? 0,
+        };
+      });
 
       const isPrivileged = auth.roles.some((r) =>
         ['admin', 'committee_member', 'treasurer', 'auditor'].includes(r)
@@ -630,6 +676,7 @@ export function createApiRouter(): express.Router {
             ? (approvedUnpaidAssistanceRow?.count ?? 0)
             : undefined,
           monthlyCollections: monthCollections,
+          monthlyTrends,
         },
         ownSummary: {
           member: ownMember || null,

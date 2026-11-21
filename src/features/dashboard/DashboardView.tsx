@@ -4,6 +4,10 @@ import { apiFetch } from '../../shared/api/client';
 import { StatusText, formatMoney } from '../../shared/components/StatusText';
 import type { Language } from '../../shared/i18n/translations';
 import { translations } from '../../shared/i18n/translations';
+import {
+  MonthlyContributionTrendsChart,
+  type MonthlyTrendPoint,
+} from './MonthlyContributionTrendsChart';
 
 export interface UserSession {
   userAccountId: string;
@@ -36,6 +40,7 @@ interface DashboardData {
     pendingAssistance?: number;
     approvedAwaitingPayout?: number;
     monthlyCollections: Array<{ currencyCode: string; total: string; count: number }>;
+    monthlyTrends: MonthlyTrendPoint[];
   };
   ownSummary: {
     member: {
@@ -216,6 +221,13 @@ export const DashboardView: React.FC<{
                 )}
               </div>
             </div>
+
+            {/* 6-Month Verified Contribution Trends */}
+            <MonthlyContributionTrendsChart
+              trends={data.communitySummary.monthlyTrends || []}
+              lang={lang}
+              loading={loading}
+            />
 
             {/* Own Latest 5 Confirmed Contributions + Recent Dues */}
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">

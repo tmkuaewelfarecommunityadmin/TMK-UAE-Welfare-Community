@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { KeyRound, Plus, Search, Shield, UserCheck, UserX } from 'lucide-react';
+import { CheckCircle2, KeyRound, Plus, Search, Shield, UserCheck, UserX, XCircle } from 'lucide-react';
 import { apiFetch } from '../../shared/api/client';
-import { StatusText, formatMoney } from '../../shared/components/StatusText';
+import { formatMoney } from '../../shared/components/StatusText';
 import type { Language } from '../../shared/i18n/translations';
 import { translations } from '../../shared/i18n/translations';
 import type { UserSession } from '../dashboard/DashboardView';
@@ -31,6 +31,30 @@ interface MemberRow {
 }
 
 const ALL_ROLE_CODES = ['admin', 'committee_member', 'treasurer', 'member', 'auditor'] as const;
+
+const MemberStatusBadge: React.FC<{ status: 'active' | 'inactive'; lang: Language }> = ({
+  status,
+  lang,
+}) => {
+  const t = translations[lang];
+  const isActive = status === 'active';
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-semibold whitespace-nowrap ${
+        isActive
+          ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-300'
+          : 'border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-300'
+      }`}
+    >
+      {isActive ? (
+        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
+      ) : (
+        <XCircle className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" />
+      )}
+      <span>{isActive ? t.statusActive : t.statusInactive}</span>
+    </span>
+  );
+};
 
 export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ user, lang }) => {
   const t = translations[lang];
@@ -99,6 +123,16 @@ export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ u
       );
     });
   }, [membersList, search, statusFilter]);
+
+  const statusCounts = useMemo(() => {
+    let active = 0;
+    let inactive = 0;
+    for (const m of membersList) {
+      if (m.status === 'active') active++;
+      else inactive++;
+    }
+    return { all: membersList.length, active, inactive };
+  }, [membersList]);
 
   const openCreateModal = () => {
     setEditingMember(null);
@@ -276,20 +310,33 @@ export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ u
           />
         </div>
         <div className="inline-flex rounded-lg bg-slate-100 p-1 dark:bg-slate-900">
-          {(['all', 'active', 'inactive'] as const).map((st) => (
-            <button
-              key={st}
-              type="button"
-              onClick={() => setStatusFilter(st)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition ${
-                statusFilter === st
-                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-800 dark:text-white'
-                  : 'text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              {st}
-            </button>
-          ))}
+          {(['all', 'active', 'inactive'] as const).map((st) => {
+            const label =
+              st === 'all'
+                ? lang === 'ta'
+                  ? 'அனைத்தும்'
+                  : 'All'
+                : st === 'active'
+                  ? t.statusActive
+                  : t.statusInactive;
+            return (
+              <button
+                key={st}
+                type="button"
+                onClick={() => setStatusFilter(st)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap transition ${
+                  statusFilter === st
+                    ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-800 dark:text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                }`}
+              >
+                <span>{label}</span>
+                <span className="font-mono text-[11px] tabular-nums opacity-70">
+                  {statusCounts[st]}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -348,7 +395,14 @@ export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ u
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <StatusText status={m.status} lang={lang} />
+                      <div className="flex flex-col items-start gap-1">
+                        <MemberStatusBadge status={m.status} lang={lang} />
+                        {m.userAccount?.status === 'disabled' && (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-700 whitespace-nowrap dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+                            {lang === 'ta' ? 'உள்நுழைவு முடக்கப்பட்டது' : 'Login Disabled'}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="inline-flex items-center justify-end gap-1.5">
