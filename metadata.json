@@ -1,0 +1,6 @@
+{
+  "name": "Village Welfare Community Fund",
+  "description": "Transparent bilingual (English & Tamil) community fund administration for member contributions, committee assistance approvals, multi-currency INR/AED treasury, UAE settlements, and append-only audit trails.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
