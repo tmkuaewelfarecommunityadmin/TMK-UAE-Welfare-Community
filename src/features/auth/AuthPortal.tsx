@@ -384,7 +384,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
         {/* Mobile Quick Switcher */}
         <div className="flex border-t border-slate-200 px-4 md:hidden dark:border-slate-800">
-          {(['overview', 'assistance', 'track', 'signin'] as const).map((tab) => (
+          {(['overview', 'assistance', 'track'] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -399,9 +399,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 ? t.overview
                 : tab === 'assistance'
                   ? t.publicAssistance
-                  : tab === 'track'
-                    ? t.trackRequest
-                    : t.signIn}
+                  : t.trackRequest}
             </button>
           ))}
         </div>
