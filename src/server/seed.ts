@@ -1,16 +1,31 @@
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   assistanceReasons,
   fundAccounts,
+  memberRoles,
+  members,
   roles,
   siteSettings,
+  userAccounts,
   type LandingHighlight,
   type LandingSlidePhoto,
 } from '../db/schema.ts';
+import { recordAudit } from './audit.ts';
+import { hashPassword } from './crypto.ts';
 
 let seeded = false;
+let seedingPromise: Promise<void> | null = null;
 
-export const INITIAL_OWNER_EMAIL = 'tmkuaewelfarecommunityadmin@gmail.com';
+export const INITIAL_OWNER_EMAIL = (
+  process.env.SEED_ADMIN_EMAIL || 'tmkuaewelfarecommunityadmin@gmail.com'
+)
+  .trim()
+  .toLowerCase();
+export const DEFAULT_ADMIN_USERNAME = (process.env.SEED_ADMIN_USERNAME || 'admin')
+  .trim()
+  .toLowerCase();
+const DEFAULT_ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || 'admin@54321';
 
 export const DEFAULT_SITE_SETTINGS: {
   id: string;
@@ -177,31 +192,169 @@ export const SYSTEM_ACCOUNTS = [
   },
 ] as const;
 
-export async function ensureReferenceData(): Promise<void> {
-  if (seeded) return;
-  try {
-    for (const r of SYSTEM_ROLES) {
-      await db.insert(roles).values(r).onConflictDoNothing({ target: roles.code });
+export interface SeedOptions {
+  forceAdminPasswordReset?: boolean;
+}
+
+async function ensureDefaultAdminUser(options: SeedOptions = {}): Promise<void> {
+  const forcePasswordReset =
+    options.forceAdminPasswordReset || process.env.SEED_ADMIN_FORCE_PASSWORD_RESET === 'true';
+
+  await db.transaction(async (tx) => {
+    const [existingAccount] = await tx
+      .select()
+      .from(userAccounts)
+      .where(
+        sql`LOWER(${userAccounts.username}) = ${DEFAULT_ADMIN_USERNAME} OR LOWER(${userAccounts.recoveryEmail}) = ${INITIAL_OWNER_EMAIL}`
+      )
+      .limit(1);
+
+    let [adminMember] = existingAccount?.memberId
+      ? await tx.select().from(members).where(eq(members.id, existingAccount.memberId)).limit(1)
+      : await tx
+          .select()
+          .from(members)
+          .where(
+            sql`${members.memberNumber} = 'M-0001' OR LOWER(${members.email}) = ${INITIAL_OWNER_EMAIL}`
+          )
+          .limit(1);
+
+    if (!adminMember) {
+      const [insertedMember] = await tx
+        .insert(members)
+        .values({
+          memberNumber: 'M-0001',
+          fullNameEn: 'Village Fund Administrator',
+          fullNameTa: 'கிராம நல நிதி நிர்வாகி',
+          email: INITIAL_OWNER_EMAIL,
+          contributionFrequency: 'monthly',
+          expectedContributionAmount: '500.00',
+          expectedContributionCurrency: 'INR',
+          status: 'active',
+        })
+        .onConflictDoNothing({ target: members.memberNumber })
+        .returning();
+
+      adminMember =
+        insertedMember ??
+        (await tx.select().from(members).where(eq(members.memberNumber, 'M-0001')).limit(1))[0];
+    } else if (!adminMember.email) {
+      const [updatedMember] = await tx
+        .update(members)
+        .set({ email: INITIAL_OWNER_EMAIL, updatedAt: new Date() })
+        .where(eq(members.id, adminMember.id))
+        .returning();
+      adminMember = updatedMember;
     }
-    for (const acc of SYSTEM_ACCOUNTS) {
+
+    let adminAccount = existingAccount;
+    const allRoles = await tx.select().from(roles);
+
+    if (!adminAccount) {
+      const [insertedAccount] = await tx
+        .insert(userAccounts)
+        .values({
+          memberId: adminMember.id,
+          username: DEFAULT_ADMIN_USERNAME,
+          recoveryEmail: INITIAL_OWNER_EMAIL,
+          passwordHash: hashPassword(DEFAULT_ADMIN_PASSWORD),
+          status: 'active',
+        })
+        .onConflictDoNothing({ target: userAccounts.username })
+        .returning();
+
+      if (insertedAccount) {
+        adminAccount = insertedAccount;
+        await recordAudit(tx, {
+          actorUserId: insertedAccount.id,
+          actorMemberId: adminMember.id,
+          actorUsername: insertedAccount.username,
+          actorRoleCodes: allRoles.map((r) => r.code),
+          entityType: 'user_account',
+          entityId: insertedAccount.id,
+          action: 'default_admin_seeded',
+          newValues: {
+            username: insertedAccount.username,
+            recoveryEmail: INITIAL_OWNER_EMAIL,
+            memberNumber: adminMember.memberNumber,
+          },
+        });
+      } else {
+        adminAccount = (
+          await tx
+            .select()
+            .from(userAccounts)
+            .where(sql`LOWER(${userAccounts.username}) = ${DEFAULT_ADMIN_USERNAME}`)
+            .limit(1)
+        )[0];
+      }
+    }
+
+    if (adminAccount) {
+      const patch: Partial<typeof userAccounts.$inferInsert> = {};
+      if (!adminAccount.passwordHash || forcePasswordReset) {
+        patch.passwordHash = hashPassword(DEFAULT_ADMIN_PASSWORD);
+      }
+      if (!adminAccount.recoveryEmail) {
+        patch.recoveryEmail = INITIAL_OWNER_EMAIL;
+      }
+      if (!adminAccount.memberId) {
+        patch.memberId = adminMember.id;
+      }
+      if (Object.keys(patch).length > 0) {
+        patch.updatedAt = new Date();
+        await tx.update(userAccounts).set(patch).where(eq(userAccounts.id, adminAccount.id));
+      }
+    }
+
+    for (const r of allRoles) {
+      await tx
+        .insert(memberRoles)
+        .values({
+          memberId: adminMember.id,
+          roleId: r.id,
+          assignedBy: adminAccount?.id ?? null,
+        })
+        .onConflictDoNothing();
+    }
+  });
+}
+
+export async function ensureReferenceData(options: SeedOptions = {}): Promise<void> {
+  if (seeded && !options.forceAdminPasswordReset) return;
+  if (seedingPromise) return seedingPromise;
+
+  seedingPromise = (async () => {
+    try {
+      for (const r of SYSTEM_ROLES) {
+        await db.insert(roles).values(r).onConflictDoNothing({ target: roles.code });
+      }
+      for (const acc of SYSTEM_ACCOUNTS) {
+        await db
+          .insert(fundAccounts)
+          .values({ ...acc, isActive: true })
+          .onConflictDoNothing({ target: fundAccounts.accountCode });
+      }
+      for (const reason of SYSTEM_ASSISTANCE_REASONS) {
+        await db
+          .insert(assistanceReasons)
+          .values(reason)
+          .onConflictDoNothing({ target: assistanceReasons.nameEn });
+      }
       await db
-        .insert(fundAccounts)
-        .values({ ...acc, isActive: true })
-        .onConflictDoNothing({ target: fundAccounts.accountCode });
+        .insert(siteSettings)
+        .values(DEFAULT_SITE_SETTINGS)
+        .onConflictDoNothing({ target: siteSettings.id });
+
+      await ensureDefaultAdminUser(options);
+      seeded = true;
+    } catch (error) {
+      console.error('Failed to seed reference data:', error);
+      throw new Error('Failed to initialize reference data.', { cause: error });
+    } finally {
+      seedingPromise = null;
     }
-    for (const reason of SYSTEM_ASSISTANCE_REASONS) {
-      await db
-        .insert(assistanceReasons)
-        .values(reason)
-        .onConflictDoNothing({ target: assistanceReasons.nameEn });
-    }
-    await db
-      .insert(siteSettings)
-      .values(DEFAULT_SITE_SETTINGS)
-      .onConflictDoNothing({ target: siteSettings.id });
-    seeded = true;
-  } catch (error) {
-    console.error('Failed to seed reference data:', error);
-    throw new Error('Failed to initialize reference data.', { cause: error });
-  }
+  })();
+
+  return seedingPromise;
 }

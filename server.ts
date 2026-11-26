@@ -5,11 +5,18 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createApiRouter } from './src/server/routes.ts';
+import { ensureReferenceData } from './src/server/seed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
+  try {
+    await ensureReferenceData();
+  } catch (err) {
+    console.error('Initial reference/admin seed deferred until database is ready:', err);
+  }
+
   const app = express();
   const port = Number(process.env.PORT) || 3000;
   const httpServer = http.createServer(app);
