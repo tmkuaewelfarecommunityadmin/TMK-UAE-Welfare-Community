@@ -1,11 +1,12 @@
 import crypto from 'crypto';
 import express from 'express';
-import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   approvalEligibleMembers,
   approvalRounds,
   assistanceApprovals,
+  assistanceReasons,
   assistanceRequests,
   attachments,
   auditLogs,
@@ -18,6 +19,7 @@ import {
   monthlyUaeSettlements,
   paymentSubmissions,
   roles,
+  siteSettings,
   userAccounts,
 } from '../db/schema.ts';
 import { recordAudit } from './audit.ts';
@@ -48,6 +50,11 @@ function getClientIp(req: express.Request): string {
 
 function isValidCurrency(c: unknown): c is 'INR' | 'AED' {
   return c === 'INR' || c === 'AED';
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(val: unknown): val is string {
+  return typeof val === 'string' && UUID_REGEX.test(val.trim());
 }
 
 function sanitizeCsvCell(val: unknown): string {
@@ -81,6 +88,49 @@ function validateAttachmentPayload(att: unknown): {
     sizeBytes: buf.length,
     fileDataBase64: cleanBase64,
   };
+}
+
+const MAX_AVATAR_BYTES = 1 * 1024 * 1024; // 1 MB
+
+function validateAvatarDataUrl(raw: unknown): string | null {
+  if (raw === null || raw === '') return null;
+  if (typeof raw !== 'string') {
+    throw new Error('Invalid avatar payload.');
+  }
+  const match = raw.trim().match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) {
+    throw new Error('Avatar photo must be a valid PNG, JPG, or WEBP image.');
+  }
+  const subtype = match[1];
+  const base64Body = match[2];
+  const buf = Buffer.from(base64Body, 'base64');
+  if (buf.length === 0 || buf.length > MAX_AVATAR_BYTES) {
+    throw new Error('Avatar photo must be non-empty and under 1 MB.');
+  }
+  return `data:image/${subtype};base64,${buf.toString('base64')}`;
+}
+
+const MAX_SLIDE_BYTES = 1536 * 1024; // 1.5 MB
+
+function validateSlideImageUrl(raw: unknown): string {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new Error('Slide image is required.');
+  }
+  const trimmed = raw.trim();
+  if (/^\/slides\/[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp)$/.test(trimmed)) {
+    return trimmed;
+  }
+  const match = trimmed.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) {
+    throw new Error('Slide images must be valid PNG, JPG, or WEBP files.');
+  }
+  const subtype = match[1];
+  const base64Body = match[2];
+  const buf = Buffer.from(base64Body, 'base64');
+  if (buf.length === 0 || buf.length > MAX_SLIDE_BYTES) {
+    throw new Error('Each slider photo must be under 1.5 MB.');
+  }
+  return `data:image/${subtype};base64,${buf.toString('base64')}`;
 }
 
 export function createApiRouter(): express.Router {
@@ -159,6 +209,8 @@ export function createApiRouter(): express.Router {
           email: account.recoveryEmail || member?.email || null,
           fullNameEn: member?.fullNameEn || account.username,
           fullNameTa: member?.fullNameTa || null,
+          avatarUrl: account.avatarDataUrl || null,
+          preferredLanguage: account.preferredLanguage === 'ta' ? 'ta' : 'en',
           roles: roleRows.map((r) => r.code),
         },
       });
@@ -278,13 +330,160 @@ export function createApiRouter(): express.Router {
   router.get('/auth/me', requireAuth, async (req: AuthedRequest, res) => {
     try {
       const auth = req.auth!;
+      const [account] = await db
+        .select({
+          username: userAccounts.username,
+          recoveryEmail: userAccounts.recoveryEmail,
+          hasPassword: sql<boolean>`${userAccounts.passwordHash} IS NOT NULL`,
+          hasGoogleLink: sql<boolean>`${userAccounts.authUserId} IS NOT NULL`,
+          avatarUrl: userAccounts.avatarDataUrl,
+          preferredLanguage: userAccounts.preferredLanguage,
+        })
+        .from(userAccounts)
+        .where(eq(userAccounts.id, auth.userAccountId))
+        .limit(1);
+
       const member = auth.memberId
         ? (await db.select().from(members).where(eq(members.id, auth.memberId)).limit(1))[0]
         : null;
-      return res.json({ user: auth, member });
+      return res.json({ user: auth, member, account: account || null });
     } catch (error) {
       console.error('Failed to fetch profile:', error);
       return res.status(500).json({ error: 'Failed to load profile.' });
+    }
+  });
+
+  router.patch('/auth/profile', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const auth = req.auth!;
+      const body = req.body || {};
+
+      const [existingAccount] = await db
+        .select()
+        .from(userAccounts)
+        .where(eq(userAccounts.id, auth.userAccountId))
+        .limit(1);
+      if (!existingAccount) {
+        return res.status(404).json({ error: 'Account not found.' });
+      }
+
+      let nextAvatar = existingAccount.avatarDataUrl;
+      if (body.avatarDataUrl !== undefined) {
+        nextAvatar = validateAvatarDataUrl(body.avatarDataUrl);
+      }
+
+      const rawRecoveryEmail =
+        body.recoveryEmail !== undefined
+          ? String(body.recoveryEmail || '').trim().toLowerCase() || null
+          : existingAccount.recoveryEmail;
+      if (rawRecoveryEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawRecoveryEmail)) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+      }
+
+      const nextPreferredLanguage: 'en' | 'ta' =
+        body.preferredLanguage === 'ta'
+          ? 'ta'
+          : body.preferredLanguage === 'en'
+            ? 'en'
+            : existingAccount.preferredLanguage === 'ta'
+              ? 'ta'
+              : 'en';
+
+      await db.transaction(async (tx) => {
+        await tx
+          .update(userAccounts)
+          .set({
+            avatarDataUrl: nextAvatar,
+            recoveryEmail: rawRecoveryEmail,
+            preferredLanguage: nextPreferredLanguage,
+            updatedAt: new Date(),
+            updatedBy: auth.userAccountId,
+          })
+          .where(eq(userAccounts.id, auth.userAccountId));
+
+        if (auth.memberId) {
+          const [existingMember] = await tx
+            .select()
+            .from(members)
+            .where(eq(members.id, auth.memberId))
+            .limit(1);
+
+          if (existingMember) {
+            const fullNameEn =
+              body.fullNameEn !== undefined
+                ? String(body.fullNameEn || '').trim().slice(0, 120)
+                : existingMember.fullNameEn;
+            if (!fullNameEn) {
+              throw new Error('Full Name (English) is required.');
+            }
+            const fullNameTa =
+              body.fullNameTa !== undefined
+                ? String(body.fullNameTa || '').trim().slice(0, 120) || null
+                : existingMember.fullNameTa;
+            const phoneNumber =
+              body.phoneNumber !== undefined
+                ? String(body.phoneNumber || '').trim().slice(0, 40) || null
+                : existingMember.phoneNumber;
+            const streetEn =
+              body.streetEn !== undefined
+                ? String(body.streetEn || '').trim().slice(0, 120) || null
+                : existingMember.streetEn;
+            const streetTa =
+              body.streetTa !== undefined
+                ? String(body.streetTa || '').trim().slice(0, 120) || null
+                : existingMember.streetTa;
+            const locationEn =
+              body.locationEn !== undefined
+                ? String(body.locationEn || '').trim().slice(0, 120) || null
+                : existingMember.locationEn;
+            const locationTa =
+              body.locationTa !== undefined
+                ? String(body.locationTa || '').trim().slice(0, 120) || null
+                : existingMember.locationTa;
+
+            await tx
+              .update(members)
+              .set({
+                fullNameEn,
+                fullNameTa,
+                phoneNumber,
+                email: rawRecoveryEmail ?? existingMember.email,
+                streetEn,
+                streetTa,
+                locationEn,
+                locationTa,
+                updatedAt: new Date(),
+                updatedBy: auth.userAccountId,
+              })
+              .where(eq(members.id, auth.memberId));
+          }
+        }
+
+        await recordAudit(tx, {
+          actorUserId: auth.userAccountId,
+          actorMemberId: auth.memberId,
+          actorUsername: auth.username,
+          actorRoleCodes: auth.roles,
+          entityType: 'user_account',
+          entityId: auth.userAccountId,
+          action: 'profile_updated',
+          newValues: {
+            avatarUpdated: body.avatarDataUrl !== undefined,
+            hasAvatar: Boolean(nextAvatar),
+            recoveryEmail: rawRecoveryEmail,
+            preferredLanguage: nextPreferredLanguage,
+          },
+        });
+      });
+
+      return res.json({
+        ok: true,
+        avatarUrl: nextAvatar,
+        preferredLanguage: nextPreferredLanguage,
+      });
+    } catch (error: any) {
+      console.error('Update profile error:', error);
+      return res.status(400).json({ error: error.message || 'Failed to update profile.' });
     }
   });
 
@@ -322,8 +521,158 @@ export function createApiRouter(): express.Router {
   });
 
   // ============================================================================
-  // 2. PUBLIC ASSISTANCE REQUEST & TRACKER (UNAUTHENTICATED, ZERO DATA LEAK)
+  // 2. PUBLIC SITE CONFIG, ASSISTANCE REQUEST & TRACKER (ZERO DATA LEAK)
   // ============================================================================
+  router.get('/public/site-config', async (_req, res) => {
+    try {
+      await ensureReferenceData();
+      const [config] = await db
+        .select()
+        .from(siteSettings)
+        .where(eq(siteSettings.id, 'default'))
+        .limit(1);
+      return res.json({ config: config || null });
+    } catch (error) {
+      console.error('Fetch site config error:', error);
+      return res.status(500).json({ error: 'Failed to load site configuration.' });
+    }
+  });
+
+  router.put(
+    '/admin/site-config',
+    requireAuth,
+    requireRole('admin'),
+    async (req: AuthedRequest, res) => {
+      try {
+        await ensureReferenceData();
+        const auth = req.auth!;
+        const body = req.body || {};
+
+        const appTitleEn = String(body.appTitleEn || '').trim().slice(0, 100);
+        const appTitleTa = String(body.appTitleTa || '').trim().slice(0, 120);
+        if (!appTitleEn || !appTitleTa) {
+          return res.status(400).json({ error: 'Both English and Tamil app titles are required.' });
+        }
+
+        const logoDataUrl =
+          body.logoDataUrl !== undefined ? validateAvatarDataUrl(body.logoDataUrl) : null;
+        const heroBadgeEn = String(body.heroBadgeEn || '').trim().slice(0, 140) || null;
+        const heroBadgeTa = String(body.heroBadgeTa || '').trim().slice(0, 160) || null;
+        const heroSubtitleEn = String(body.heroSubtitleEn || '').trim().slice(0, 500);
+        const heroSubtitleTa = String(body.heroSubtitleTa || '').trim().slice(0, 500);
+        if (!heroSubtitleEn || !heroSubtitleTa) {
+          return res.status(400).json({ error: 'Both English and Tamil hero subtitles are required.' });
+        }
+
+        const rawHighlights = Array.isArray(body.highlights) ? body.highlights.slice(0, 8) : [];
+        const highlights = rawHighlights.map((h: any, idx: number) => {
+          const titleEn = String(h?.titleEn || '').trim().slice(0, 100);
+          const titleTa = String(h?.titleTa || '').trim().slice(0, 120);
+          const bodyEn = String(h?.bodyEn || '').trim().slice(0, 280);
+          const bodyTa = String(h?.bodyTa || '').trim().slice(0, 320);
+          if (!titleEn || !bodyEn) {
+            throw new Error(`Content block #${idx + 1} requires an English title and text.`);
+          }
+          return {
+            id: String(h?.id || `h-${idx + 1}`).slice(0, 50),
+            titleEn,
+            titleTa: titleTa || titleEn,
+            bodyEn,
+            bodyTa: bodyTa || bodyEn,
+          };
+        });
+
+        const rawSlides = Array.isArray(body.sliderPhotos) ? body.sliderPhotos.slice(0, 10) : [];
+        const sliderPhotos = rawSlides.map((s: any, idx: number) => ({
+          id: String(s?.id || `slide-${idx + 1}`).slice(0, 50),
+          imageDataUrl: validateSlideImageUrl(s?.imageDataUrl),
+          captionEn: String(s?.captionEn || '').trim().slice(0, 180),
+          captionTa: String(s?.captionTa || '').trim().slice(0, 220),
+        }));
+
+        const updated = await db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(siteSettings)
+            .values({
+              id: 'default',
+              appTitleEn,
+              appTitleTa,
+              logoDataUrl,
+              heroBadgeEn,
+              heroBadgeTa,
+              heroSubtitleEn,
+              heroSubtitleTa,
+              highlights,
+              sliderPhotos,
+              updatedAt: new Date(),
+              updatedBy: auth.userAccountId,
+            })
+            .onConflictDoUpdate({
+              target: siteSettings.id,
+              set: {
+                appTitleEn,
+                appTitleTa,
+                logoDataUrl,
+                heroBadgeEn,
+                heroBadgeTa,
+                heroSubtitleEn,
+                heroSubtitleTa,
+                highlights,
+                sliderPhotos,
+                updatedAt: new Date(),
+                updatedBy: auth.userAccountId,
+              },
+            })
+            .returning();
+
+          await recordAudit(tx, {
+            actorUserId: auth.userAccountId,
+            actorMemberId: auth.memberId,
+            actorUsername: auth.username,
+            actorRoleCodes: auth.roles,
+            entityType: 'site_settings',
+            entityId: auth.userAccountId,
+            action: 'landing_config_updated',
+            newValues: {
+              appTitleEn,
+              appTitleTa,
+              hasLogo: Boolean(logoDataUrl),
+              slidesCount: sliderPhotos.length,
+              highlightsCount: highlights.length,
+            },
+          });
+
+          return row;
+        });
+
+        return res.json({ config: updated });
+      } catch (error: any) {
+        console.error('Update site config error:', error);
+        return res.status(400).json({ error: error.message || 'Failed to update landing page settings.' });
+      }
+    }
+  );
+
+  router.get('/public/assistance-reasons', async (_req, res) => {
+    try {
+      await ensureReferenceData();
+      const rows = await db
+        .select({
+          id: assistanceReasons.id,
+          nameEn: assistanceReasons.nameEn,
+          nameTa: assistanceReasons.nameTa,
+          status: assistanceReasons.status,
+        })
+        .from(assistanceReasons)
+        .where(eq(assistanceReasons.status, 'active'))
+        .orderBy(asc(assistanceReasons.nameEn));
+      return res.json({ reasons: rows });
+    } catch (error) {
+      console.error('Fetch public assistance reasons error:', error);
+      return res.status(500).json({ error: 'Failed to load assistance reasons.' });
+    }
+  });
+
   router.post('/public/assistance', async (req, res) => {
     try {
       const ip = getClientIp(req);
@@ -354,12 +703,33 @@ export function createApiRouter(): express.Router {
       const familyNameTa = String(body.familyNameTa || '').trim() || null;
       const streetEn = String(body.streetEn || '').trim() || null;
       const streetTa = String(body.streetTa || '').trim() || null;
-      const reason = String(body.reason || '').trim();
+      const rawReasonId = typeof body.reasonId === 'string' ? body.reasonId.trim() : '';
+      const rawReasonText = String(body.reason || '').trim();
       const requestType = body.requestType === 'emergency' ? 'emergency' : 'normal';
       const currencyCode = isValidCurrency(body.currencyCode) ? body.currencyCode : 'INR';
       const amountNum = Number(body.requestedAmount);
 
-      if (!publicRequesterName || !beneficiaryNameEn || !reason || !Number.isFinite(amountNum) || amountNum <= 0) {
+      let resolvedReasonId: string | null = null;
+      let resolvedReasonText = rawReasonText;
+      if (rawReasonId) {
+        if (!isValidUuid(rawReasonId)) {
+          return res.status(400).json({ error: 'Selected reason is invalid.' });
+        }
+        const [reasonRow] = await db
+          .select()
+          .from(assistanceReasons)
+          .where(and(eq(assistanceReasons.id, rawReasonId), eq(assistanceReasons.status, 'active')))
+          .limit(1);
+        if (!reasonRow) {
+          return res.status(400).json({ error: 'Selected assistance reason is inactive or not found.' });
+        }
+        resolvedReasonId = reasonRow.id;
+        resolvedReasonText = rawReasonText
+          ? `${reasonRow.nameEn} — ${rawReasonText}`
+          : reasonRow.nameEn;
+      }
+
+      if (!publicRequesterName || !beneficiaryNameEn || !resolvedReasonText || !Number.isFinite(amountNum) || amountNum <= 0) {
         return res.status(400).json({
           error: 'Requester name, beneficiary name, positive amount, and reason are required.',
         });
@@ -408,7 +778,8 @@ export function createApiRouter(): express.Router {
             streetTa,
             requestedAmount: amountNum.toFixed(2),
             currencyCode,
-            reason,
+            reasonId: resolvedReasonId,
+            reason: resolvedReasonText,
             requestType,
             status: initialStatus,
             publicTrackingTokenHash: sha256Hex(trackingToken),
@@ -524,25 +895,59 @@ export function createApiRouter(): express.Router {
   router.get('/dashboard', requireAuth, async (req: AuthedRequest, res) => {
     try {
       const auth = req.auth!;
+      const nowIso = new Date().toISOString();
+      const rawPeriod = String(req.query.period || 'all_time');
+      const period: 'all_time' | 'yearly' | 'monthly' =
+        rawPeriod === 'yearly' || rawPeriod === 'monthly' ? rawPeriod : 'all_time';
+
+      const rawYear = String(req.query.year || '');
+      const year = /^\d{4}$/.test(rawYear) ? rawYear : nowIso.slice(0, 4);
+
       const rawMonth = String(req.query.month || '');
-      const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth)
-        ? rawMonth
-        : new Date().toISOString().slice(0, 7);
+      const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth) ? rawMonth : nowIso.slice(0, 7);
 
-      const [yearStr, monthStr] = month.split('-');
-      const baseYear = Number(yearStr);
-      const baseMonthIdx = Number(monthStr) - 1;
-      const trendMonths: string[] = [];
-      for (let i = 5; i >= 0; i--) {
-        const d = new Date(Date.UTC(baseYear, baseMonthIdx - i, 1));
-        trendMonths.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+      let periodRange: { startDate: string; endDate: string } | undefined;
+      let trendMonths: string[] = [];
+
+      if (period === 'yearly') {
+        periodRange = {
+          startDate: `${year}-01-01`,
+          endDate: `${year}-12-31`,
+        };
+        for (let m = 1; m <= 12; m++) {
+          trendMonths.push(`${year}-${String(m).padStart(2, '0')}`);
+        }
+      } else if (period === 'monthly') {
+        const [yearStr, monthStr] = month.split('-');
+        const baseYear = Number(yearStr);
+        const baseMonthIdx = Number(monthStr) - 1;
+        const selectedMonthLastDay = new Date(Date.UTC(baseYear, baseMonthIdx + 1, 0)).getUTCDate();
+        periodRange = {
+          startDate: `${month}-01`,
+          endDate: `${month}-${String(selectedMonthLastDay).padStart(2, '0')}`,
+        };
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(Date.UTC(baseYear, baseMonthIdx - i, 1));
+          trendMonths.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+        }
+      } else {
+        // all_time: cumulative balances & collections, plus trailing 6-month trend ending at current month
+        const currentYear = Number(nowIso.slice(0, 4));
+        const currentMonthIdx = Number(nowIso.slice(5, 7)) - 1;
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(Date.UTC(currentYear, currentMonthIdx - i, 1));
+          trendMonths.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+        }
       }
-      const firstMonthStart = `${trendMonths[0]}-01`;
-      const selectedMonthLastDay = new Date(Date.UTC(baseYear, baseMonthIdx + 1, 0)).getUTCDate();
-      const selectedMonthStart = `${month}-01`;
-      const selectedMonthEnd = `${month}-${String(selectedMonthLastDay).padStart(2, '0')}`;
 
-      const accountBalances = await getAccountBalances(db);
+      const trendStart = `${trendMonths[0]}-01`;
+      const lastTrendParts = trendMonths[trendMonths.length - 1].split('-').map(Number);
+      const trendEndLastDay = new Date(
+        Date.UTC(lastTrendParts[0], lastTrendParts[1], 0)
+      ).getUTCDate();
+      const trendEnd = `${trendMonths[trendMonths.length - 1]}-${String(trendEndLastDay).padStart(2, '0')}`;
+
+      const accountBalances = await getAccountBalances(db, periodRange);
       const inrAssetAccounts = accountBalances.filter(
         (a) => a.accountType === 'asset' && a.currencyCode === 'INR'
       );
@@ -573,7 +978,7 @@ export function createApiRouter(): express.Router {
         .from(assistanceRequests)
         .where(eq(assistanceRequests.status, 'approved'));
 
-      // Own latest 5 confirmed contributions (FR-CON-009)
+      // Own confirmed contributions (filtered by selected period when yearly/monthly)
       const ownLatestFive = auth.memberId
         ? await db
             .select({
@@ -588,30 +993,45 @@ export function createApiRouter(): express.Router {
             })
             .from(paymentSubmissions)
             .where(
-              and(
-                eq(paymentSubmissions.memberId, auth.memberId),
-                eq(paymentSubmissions.status, 'approved')
-              )
+              periodRange
+                ? and(
+                    eq(paymentSubmissions.memberId, auth.memberId),
+                    eq(paymentSubmissions.status, 'approved'),
+                    gte(paymentSubmissions.paymentDate, periodRange.startDate),
+                    lte(paymentSubmissions.paymentDate, periodRange.endDate)
+                  )
+                : and(
+                    eq(paymentSubmissions.memberId, auth.memberId),
+                    eq(paymentSubmissions.status, 'approved')
+                  )
             )
             .orderBy(desc(paymentSubmissions.paymentDate), desc(paymentSubmissions.approvedAt))
-            .limit(5)
+            .limit(period === 'all_time' ? 5 : 12)
         : [];
 
       const ownDues = auth.memberId
         ? await db
             .select()
             .from(contributionDues)
-            .where(eq(contributionDues.memberId, auth.memberId))
+            .where(
+              periodRange
+                ? and(
+                    eq(contributionDues.memberId, auth.memberId),
+                    gte(contributionDues.periodStart, periodRange.startDate),
+                    lte(contributionDues.periodStart, periodRange.endDate)
+                  )
+                : eq(contributionDues.memberId, auth.memberId)
+            )
             .orderBy(desc(contributionDues.periodStart))
-            .limit(6)
+            .limit(period === 'all_time' ? 6 : 12)
         : [];
 
       const [ownMember] = auth.memberId
         ? await db.select().from(members).where(eq(members.id, auth.memberId)).limit(1)
         : [];
 
-      // Monthly collections summary (confirmed payments in selected month)
-      const monthCollections = await db
+      // Verified collections summary in selected period (all_time, yearly, or monthly)
+      const periodCollections = await db
         .select({
           currencyCode: paymentSubmissions.currencyCode,
           total: sql<string>`COALESCE(SUM(${paymentSubmissions.amount}), 0)`,
@@ -619,15 +1039,17 @@ export function createApiRouter(): express.Router {
         })
         .from(paymentSubmissions)
         .where(
-          and(
-            eq(paymentSubmissions.status, 'approved'),
-            gte(paymentSubmissions.paymentDate, selectedMonthStart),
-            lte(paymentSubmissions.paymentDate, selectedMonthEnd)
-          )
+          periodRange
+            ? and(
+                eq(paymentSubmissions.status, 'approved'),
+                gte(paymentSubmissions.paymentDate, periodRange.startDate),
+                lte(paymentSubmissions.paymentDate, periodRange.endDate)
+              )
+            : eq(paymentSubmissions.status, 'approved')
         )
         .groupBy(paymentSubmissions.currencyCode);
 
-      // 6-month verified contribution trends ending at selected month (INR & AED separated)
+      // Monthly verified contribution trends for chart (INR & AED separated)
       const trendRows = await db
         .select({
           monthKey: sql<string>`SUBSTR(${paymentSubmissions.paymentDate}, 1, 7)`,
@@ -639,8 +1061,8 @@ export function createApiRouter(): express.Router {
         .where(
           and(
             eq(paymentSubmissions.status, 'approved'),
-            gte(paymentSubmissions.paymentDate, firstMonthStart),
-            lte(paymentSubmissions.paymentDate, selectedMonthEnd)
+            gte(paymentSubmissions.paymentDate, trendStart),
+            lte(paymentSubmissions.paymentDate, trendEnd)
           )
         )
         .groupBy(sql`SUBSTR(${paymentSubmissions.paymentDate}, 1, 7)`, paymentSubmissions.currencyCode);
@@ -662,6 +1084,8 @@ export function createApiRouter(): express.Router {
       );
 
       return res.json({
+        period,
+        year,
         month,
         balances: {
           inrTotal: fromMinorUnits(totalInrMinor),
@@ -675,7 +1099,8 @@ export function createApiRouter(): express.Router {
           approvedAwaitingPayout: isPrivileged
             ? (approvedUnpaidAssistanceRow?.count ?? 0)
             : undefined,
-          monthlyCollections: monthCollections,
+          monthlyCollections: periodCollections,
+          periodCollections,
           monthlyTrends,
         },
         ownSummary: {
@@ -1231,6 +1656,7 @@ export function createApiRouter(): express.Router {
         ['admin', 'committee_member', 'treasurer', 'auditor'].includes(r)
       );
       const statusFilter = req.query.status ? String(req.query.status) : null;
+      const duplicatesOnly = req.query.duplicatesOnly === 'true' || statusFilter === 'duplicates';
       const targetMemberId = req.query.memberId ? String(req.query.memberId) : null;
 
       if (!isPrivileged && targetMemberId && targetMemberId !== auth.memberId) {
@@ -1239,12 +1665,12 @@ export function createApiRouter(): express.Router {
 
       const conditions = [];
       if (!isPrivileged) {
-        if (!auth.memberId) return res.json({ payments: [] });
+        if (!auth.memberId) return res.json({ payments: [], duplicateCount: 0 });
         conditions.push(eq(paymentSubmissions.memberId, auth.memberId));
       } else if (targetMemberId) {
         conditions.push(eq(paymentSubmissions.memberId, targetMemberId));
       }
-      if (statusFilter) {
+      if (statusFilter && statusFilter !== 'duplicates') {
         conditions.push(eq(paymentSubmissions.status, statusFilter));
       }
 
@@ -1276,7 +1702,71 @@ export function createApiRouter(): express.Router {
         .orderBy(desc(paymentSubmissions.createdAt))
         .limit(200);
 
-      const ids = rows.map((r) => r.id);
+      // Compute duplicate detection across all active (pending + approved) submissions
+      const activeScopeConditions = [inArray(paymentSubmissions.status, ['pending', 'approved'])];
+      if (!isPrivileged && auth.memberId) {
+        activeScopeConditions.push(eq(paymentSubmissions.memberId, auth.memberId));
+      } else if (targetMemberId) {
+        activeScopeConditions.push(eq(paymentSubmissions.memberId, targetMemberId));
+      }
+
+      const activeRows = await db
+        .select({
+          id: paymentSubmissions.id,
+          memberId: paymentSubmissions.memberId,
+          paymentDate: paymentSubmissions.paymentDate,
+          amount: paymentSubmissions.amount,
+          currencyCode: paymentSubmissions.currencyCode,
+          transactionReference: paymentSubmissions.transactionReference,
+        })
+        .from(paymentSubmissions)
+        .where(and(...activeScopeConditions));
+
+      const signatureCounts = new Map<string, number>();
+      const refCounts = new Map<string, number>();
+      for (const a of activeRows) {
+        const sigKey = `${a.memberId}|${a.paymentDate}|${Number(a.amount).toFixed(2)}|${a.currencyCode}`;
+        signatureCounts.set(sigKey, (signatureCounts.get(sigKey) || 0) + 1);
+        const normRef = a.transactionReference.trim().toLowerCase().replace(/\s+/g, '');
+        if (normRef && normRef !== 'cash') {
+          const refKey = `${normRef}|${a.currencyCode}`;
+          refCounts.set(refKey, (refCounts.get(refKey) || 0) + 1);
+        }
+      }
+
+      const isAdmin = auth.roles.includes('admin');
+      const isCommitteeOrAdmin = auth.roles.some(
+        (role) => role === 'committee_member' || role === 'admin'
+      );
+
+      const enriched = rows.map((r) => {
+        const isActive = r.status === 'pending' || r.status === 'approved';
+        const sigKey = `${r.memberId}|${r.paymentDate}|${Number(r.amount).toFixed(2)}|${r.currencyCode}`;
+        const normRef = r.transactionReference.trim().toLowerCase().replace(/\s+/g, '');
+        const refKey = normRef && normRef !== 'cash' ? `${normRef}|${r.currencyCode}` : '';
+        const isPotentialDuplicate =
+          isActive &&
+          ((signatureCounts.get(sigKey) || 0) > 1 ||
+            (refKey !== '' && (refCounts.get(refKey) || 0) > 1));
+
+        return {
+          ...r,
+          isPotentialDuplicate,
+          canApprove:
+            isCommitteeOrAdmin &&
+            r.status === 'pending' &&
+            r.submittedByUserId !== auth.userAccountId,
+          canDeleteDuplicate:
+            isAdmin && ['pending', 'approved', 'rejected'].includes(r.status),
+        };
+      });
+
+      const duplicateCount = enriched.filter((r) => r.isPotentialDuplicate).length;
+      const filteredRows = duplicatesOnly
+        ? enriched.filter((r) => r.isPotentialDuplicate)
+        : enriched;
+
+      const ids = filteredRows.map((r) => r.id);
       const attList =
         ids.length > 0
           ? await db
@@ -1304,13 +1794,10 @@ export function createApiRouter(): express.Router {
       }
 
       return res.json({
-        payments: rows.map((r) => ({
+        duplicateCount,
+        payments: filteredRows.map((r) => ({
           ...r,
           attachments: attMap.get(r.id) || [],
-          canApprove:
-            auth.roles.some((role) => role === 'committee_member' || role === 'admin') &&
-            r.status === 'pending' &&
-            r.submittedByUserId !== auth.userAccountId,
         })),
       });
     } catch (error) {
@@ -1340,6 +1827,7 @@ export function createApiRouter(): express.Router {
       const transactionReference = String(body.transactionReference || '').trim();
       const notes = String(body.notes || '').trim() || null;
       const contributionDueId = body.contributionDueId ? String(body.contributionDueId) : null;
+      const confirmDuplicate = body.confirmDuplicate === true;
 
       if (!Number.isFinite(amountNum) || amountNum <= 0 || !transactionReference) {
         return res.status(400).json({
@@ -1363,6 +1851,29 @@ export function createApiRouter(): express.Router {
         if (dup.length > 0) {
           return res.status(409).json({
             error: `Duplicate transaction reference "${transactionReference}" already exists for ${currencyCode}.`,
+          });
+        }
+      }
+
+      // Potential duplicate safeguard across cash & non-cash (same member + date + amount + currency)
+      if (!confirmDuplicate) {
+        const sameSignature = await db
+          .select({ id: paymentSubmissions.id })
+          .from(paymentSubmissions)
+          .where(
+            and(
+              eq(paymentSubmissions.memberId, targetMemberId),
+              eq(paymentSubmissions.paymentDate, paymentDate),
+              eq(paymentSubmissions.amount, amountNum.toFixed(2)),
+              eq(paymentSubmissions.currencyCode, currencyCode),
+              inArray(paymentSubmissions.status, ['pending', 'approved'])
+            )
+          )
+          .limit(1);
+        if (sameSignature.length > 0) {
+          return res.status(409).json({
+            code: 'POTENTIAL_DUPLICATE',
+            error: `A ${currencyCode} ${amountNum.toFixed(2)} submission for ${paymentDate} already exists for this member. Confirm if intentional.`,
           });
         }
       }
@@ -1654,6 +2165,247 @@ export function createApiRouter(): express.Router {
     }
   );
 
+  // Admin-only duplicate transaction removal / safe ledger reversal
+  router.delete(
+    '/contributions/payments/:id',
+    requireAuth,
+    requireRole('admin'),
+    async (req: AuthedRequest, res) => {
+      try {
+        const auth = req.auth!;
+        const submissionId = String(req.params.id);
+        if (!isValidUuid(submissionId)) {
+          return res.status(404).json({ error: 'Payment submission not found.' });
+        }
+
+        const reason = String(req.body?.reason || req.query?.reason || '').trim();
+        if (!reason) {
+          return res.status(400).json({ error: 'Reason for removing duplicate is required.' });
+        }
+
+        const result = await db.transaction(async (tx) => {
+          const lockedRows = await tx.execute(
+            sql`SELECT * FROM payment_submissions WHERE id = ${submissionId} FOR UPDATE`
+          );
+          const row = lockedRows.rows[0] as Record<string, any> | undefined;
+          if (!row) {
+            throw Object.assign(new Error('Payment submission not found.'), { statusCode: 404 });
+          }
+
+          // Case 1: Unposted submission (pending, rejected, cancelled without ledger transaction)
+          if (!row.fund_transaction_id && row.status !== 'approved') {
+            await tx
+              .delete(attachments)
+              .where(
+                and(
+                  eq(attachments.entityType, 'payment_submission'),
+                  eq(attachments.entityId, submissionId)
+                )
+              );
+
+            await tx.delete(paymentSubmissions).where(eq(paymentSubmissions.id, submissionId));
+
+            await recordAudit(tx, {
+              actorUserId: auth.userAccountId,
+              actorMemberId: auth.memberId,
+              actorUsername: auth.username,
+              actorRoleCodes: auth.roles,
+              entityType: 'payment_submission',
+              entityId: submissionId,
+              action: 'payment_duplicate_deleted',
+              oldValues: {
+                memberId: row.member_id,
+                paymentDate: row.payment_date,
+                amount: row.amount,
+                currencyCode: row.currency_code,
+                paymentMethod: row.payment_method,
+                transactionReference: row.transaction_reference,
+                status: row.status,
+              },
+              reason,
+            });
+
+            return { mode: 'deleted', status: 'deleted' };
+          }
+
+          // Case 2: Approved submission already posted to immutable double-entry ledger
+          if (row.status !== 'approved' || !row.fund_transaction_id) {
+            throw Object.assign(
+              new Error(`Cannot remove payment in status "${row.status}".`),
+              { statusCode: 409 }
+            );
+          }
+
+          const paymentMonth = String(row.payment_date || '').slice(0, 7);
+          if (row.currency_code === 'AED' && /^\d{4}-\d{2}$/.test(paymentMonth)) {
+            const [confirmedSettlement] = await tx
+              .select({ id: monthlyUaeSettlements.id, bankReference: monthlyUaeSettlements.bankReference })
+              .from(monthlyUaeSettlements)
+              .where(
+                and(
+                  eq(monthlyUaeSettlements.settlementMonth, `${paymentMonth}-01`),
+                  eq(monthlyUaeSettlements.status, 'confirmed')
+                )
+              )
+              .limit(1);
+            if (confirmedSettlement) {
+              throw Object.assign(
+                new Error(
+                  `AED payment is part of confirmed UAE settlement ${paymentMonth} (${confirmedSettlement.bankReference}). Reverse the settlement first.`
+                ),
+                { statusCode: 409 }
+              );
+            }
+          }
+
+          const origTxnId = String(row.fund_transaction_id);
+          const lockedTxns = await tx.execute(
+            sql`SELECT * FROM fund_transactions WHERE id = ${origTxnId} FOR UPDATE`
+          );
+          const origTxn = lockedTxns.rows[0] as Record<string, any> | undefined;
+          if (!origTxn) {
+            throw Object.assign(new Error('Linked ledger transaction not found.'), { statusCode: 404 });
+          }
+          if (origTxn.status === 'reversed') {
+            throw Object.assign(new Error('Linked ledger transaction is already reversed.'), {
+              statusCode: 409,
+            });
+          }
+
+          const assetCode =
+            row.currency_code === 'AED' ? '1030' : row.payment_method === 'cash' ? '1020' : '1010';
+          const balances = await getAccountBalances(tx);
+          const assetAcc = balances.find((a) => a.accountCode === assetCode);
+          const reversalMinor = toMinorUnits(row.amount);
+          if (!assetAcc || toMinorUnits(assetAcc.balance) < reversalMinor) {
+            throw Object.assign(
+              new Error(
+                `Insufficient balance in ${assetAcc?.accountName || assetCode} (${assetAcc?.balance ?? '0.00'}) to reverse this duplicate payment.`
+              ),
+              { statusCode: 409 }
+            );
+          }
+
+          const origLines = await tx
+            .select({
+              accountCode: fundAccounts.accountCode,
+              side: ledgerEntries.side,
+              transactionAmount: ledgerEntries.transactionAmount,
+              functionalAmountInr: ledgerEntries.functionalAmountInr,
+              exchangeRateToInr: ledgerEntries.exchangeRateToInr,
+            })
+            .from(ledgerEntries)
+            .innerJoin(fundAccounts, eq(ledgerEntries.fundAccountId, fundAccounts.id))
+            .where(eq(ledgerEntries.fundTransactionId, origTxnId));
+
+          const reversedLines = origLines.map((l) => ({
+            accountCode: l.accountCode,
+            side: (l.side === 'debit' ? 'credit' : 'debit') as 'debit' | 'credit',
+            transactionAmountMinor: toMinorUnits(l.transactionAmount),
+            functionalAmountInrMinor: toMinorUnits(l.functionalAmountInr),
+            exchangeRateToInr: Number(l.exchangeRateToInr),
+            description: `Duplicate removal reversal of ${origTxn.transaction_number}: ${reason}`,
+          }));
+
+          const reversal = await postBalancedTransaction(tx, {
+            transactionType: 'reversal',
+            transactionDate: new Date().toISOString().slice(0, 10),
+            referenceType: 'reversal',
+            referenceId: origTxnId,
+            description: `Duplicate contribution reversed (${origTxn.transaction_number}) · ${reason}`,
+            idempotencyKey: `reverse-dup-pay-${submissionId}`,
+            postedByUserId: auth.userAccountId,
+            reversalOfTransactionId: origTxnId,
+            lines: reversedLines,
+          });
+
+          await tx
+            .update(fundTransactions)
+            .set({ status: 'reversed' })
+            .where(eq(fundTransactions.id, origTxnId));
+
+          await tx
+            .update(paymentSubmissions)
+            .set({
+              status: 'cancelled',
+              rejectionReason: `Duplicate removed: ${reason}`,
+              updatedAt: new Date(),
+              updatedBy: auth.userAccountId,
+            })
+            .where(eq(paymentSubmissions.id, submissionId));
+
+          if (row.contribution_due_id) {
+            const [due] = await tx
+              .select()
+              .from(contributionDues)
+              .where(eq(contributionDues.id, row.contribution_due_id))
+              .limit(1);
+            if (due) {
+              const paidRows = await tx
+                .select({ total: sql<string>`COALESCE(SUM(${paymentSubmissions.amount}), 0)` })
+                .from(paymentSubmissions)
+                .where(
+                  and(
+                    eq(paymentSubmissions.contributionDueId, due.id),
+                    eq(paymentSubmissions.status, 'approved')
+                  )
+                );
+              const totalPaidMinor = toMinorUnits(paidRows[0]?.total ?? 0);
+              const dueMinor = toMinorUnits(due.dueAmount);
+              const nextDueStatus =
+                totalPaidMinor >= dueMinor
+                  ? 'paid'
+                  : totalPaidMinor > 0
+                    ? 'partially_paid'
+                    : 'unpaid';
+              await tx
+                .update(contributionDues)
+                .set({ status: nextDueStatus, updatedAt: new Date() })
+                .where(eq(contributionDues.id, due.id));
+            }
+          }
+
+          await recordAudit(tx, {
+            actorUserId: auth.userAccountId,
+            actorMemberId: auth.memberId,
+            actorUsername: auth.username,
+            actorRoleCodes: auth.roles,
+            entityType: 'payment_submission',
+            entityId: submissionId,
+            fundTransactionId: reversal.transactionId,
+            action: 'payment_duplicate_reversed',
+            oldValues: {
+              status: 'approved',
+              fundTransactionId: origTxnId,
+              amount: row.amount,
+              currencyCode: row.currency_code,
+              transactionReference: row.transaction_reference,
+            },
+            newValues: {
+              status: 'cancelled',
+              reversalTransactionNumber: reversal.transactionNumber,
+            },
+            reason,
+          });
+
+          return {
+            mode: 'reversed',
+            status: 'cancelled',
+            reversalTransactionNumber: reversal.transactionNumber,
+          };
+        });
+
+        return res.json(result);
+      } catch (error: any) {
+        const code = error.statusCode || 500;
+        if (code === 500) console.error('Duplicate payment removal failed:', error);
+        return res
+          .status(code)
+          .json({ error: error.message || 'Failed to remove duplicate payment.' });
+      }
+    }
+  );
+
   // ============================================================================
   // 6. PRIVATE ACCESS-CONTROLLED ATTACHMENTS
   // ============================================================================
@@ -1688,8 +2440,230 @@ export function createApiRouter(): express.Router {
   });
 
   // ============================================================================
-  // 7. ASSISTANCE REQUESTS, FROZEN COMMITTEE APPROVAL & TREASURER PAYOUT
+  // 7. ASSISTANCE REASONS (ADMIN MANAGEMENT) & ASSISTANCE REQUESTS
   // ============================================================================
+  router.get(
+    '/assistance-reasons',
+    requireAuth,
+    requireRole('admin'),
+    async (_req: AuthedRequest, res) => {
+      try {
+        await ensureReferenceData();
+        const rows = await db
+          .select()
+          .from(assistanceReasons)
+          .orderBy(asc(assistanceReasons.status), asc(assistanceReasons.nameEn));
+        return res.json({ reasons: rows });
+      } catch (error) {
+        console.error('Fetch admin assistance reasons error:', error);
+        return res.status(500).json({ error: 'Failed to load assistance reasons.' });
+      }
+    }
+  );
+
+  router.post(
+    '/assistance-reasons',
+    requireAuth,
+    requireRole('admin'),
+    async (req: AuthedRequest, res) => {
+      try {
+        const auth = req.auth!;
+        const nameEn = String(req.body?.nameEn || '').trim();
+        const nameTa = String(req.body?.nameTa || '').trim();
+        const status = req.body?.status === 'inactive' ? 'inactive' : 'active';
+
+        if (!nameEn || !nameTa) {
+          return res.status(400).json({
+            error: 'Both English (EN) and Tamil (TA) reason names are required.',
+          });
+        }
+
+        const existing = await db
+          .select({ id: assistanceReasons.id })
+          .from(assistanceReasons)
+          .where(sql`LOWER(${assistanceReasons.nameEn}) = LOWER(${nameEn})`)
+          .limit(1);
+        if (existing.length > 0) {
+          return res.status(409).json({ error: 'An assistance reason with this English name already exists.' });
+        }
+
+        const created = await db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(assistanceReasons)
+            .values({
+              nameEn,
+              nameTa,
+              status,
+              createdBy: auth.userAccountId,
+              updatedBy: auth.userAccountId,
+            })
+            .returning();
+
+          await recordAudit(tx, {
+            actorUserId: auth.userAccountId,
+            actorMemberId: auth.memberId,
+            actorUsername: auth.username,
+            actorRoleCodes: auth.roles,
+            entityType: 'assistance_reason',
+            entityId: row.id,
+            action: 'assistance_reason_created',
+            newValues: { nameEn, nameTa, status },
+          });
+
+          return row;
+        });
+
+        return res.status(201).json({ reason: created });
+      } catch (error: any) {
+        console.error('Create assistance reason error:', error);
+        return res.status(400).json({ error: error.message || 'Failed to create assistance reason.' });
+      }
+    }
+  );
+
+  router.patch(
+    '/assistance-reasons/:id',
+    requireAuth,
+    requireRole('admin'),
+    async (req: AuthedRequest, res) => {
+      try {
+        const auth = req.auth!;
+        const id = String(req.params.id || '').trim();
+        if (!isValidUuid(id)) {
+          return res.status(400).json({ error: 'Invalid reason ID.' });
+        }
+
+        const [existing] = await db
+          .select()
+          .from(assistanceReasons)
+          .where(eq(assistanceReasons.id, id))
+          .limit(1);
+        if (!existing) {
+          return res.status(404).json({ error: 'Assistance reason not found.' });
+        }
+
+        const nameEn =
+          req.body?.nameEn !== undefined ? String(req.body.nameEn).trim() : existing.nameEn;
+        const nameTa =
+          req.body?.nameTa !== undefined ? String(req.body.nameTa).trim() : existing.nameTa;
+        const status =
+          req.body?.status === 'active' || req.body?.status === 'inactive'
+            ? req.body.status
+            : existing.status;
+
+        if (!nameEn || !nameTa) {
+          return res.status(400).json({
+            error: 'Both English (EN) and Tamil (TA) reason names are required.',
+          });
+        }
+
+        const duplicate = await db
+          .select({ id: assistanceReasons.id })
+          .from(assistanceReasons)
+          .where(sql`LOWER(${assistanceReasons.nameEn}) = LOWER(${nameEn}) AND ${assistanceReasons.id} <> ${id}`)
+          .limit(1);
+        if (duplicate.length > 0) {
+          return res.status(409).json({ error: 'Another assistance reason with this English name already exists.' });
+        }
+
+        const updated = await db.transaction(async (tx) => {
+          const [row] = await tx
+            .update(assistanceReasons)
+            .set({
+              nameEn,
+              nameTa,
+              status,
+              updatedAt: new Date(),
+              updatedBy: auth.userAccountId,
+            })
+            .where(eq(assistanceReasons.id, id))
+            .returning();
+
+          await recordAudit(tx, {
+            actorUserId: auth.userAccountId,
+            actorMemberId: auth.memberId,
+            actorUsername: auth.username,
+            actorRoleCodes: auth.roles,
+            entityType: 'assistance_reason',
+            entityId: row.id,
+            action: 'assistance_reason_updated',
+            oldValues: {
+              nameEn: existing.nameEn,
+              nameTa: existing.nameTa,
+              status: existing.status,
+            },
+            newValues: { nameEn, nameTa, status },
+          });
+
+          return row;
+        });
+
+        return res.json({ reason: updated });
+      } catch (error: any) {
+        console.error('Update assistance reason error:', error);
+        return res.status(400).json({ error: error.message || 'Failed to update assistance reason.' });
+      }
+    }
+  );
+
+  router.delete(
+    '/assistance-reasons/:id',
+    requireAuth,
+    requireRole('admin'),
+    async (req: AuthedRequest, res) => {
+      try {
+        const auth = req.auth!;
+        const id = String(req.params.id || '').trim();
+        if (!isValidUuid(id)) {
+          return res.status(400).json({ error: 'Invalid reason ID.' });
+        }
+
+        const [existing] = await db
+          .select()
+          .from(assistanceReasons)
+          .where(eq(assistanceReasons.id, id))
+          .limit(1);
+        if (!existing) {
+          return res.status(404).json({ error: 'Assistance reason not found.' });
+        }
+
+        const [used] = await db
+          .select({ count: sql<number>`COUNT(*)::int` })
+          .from(assistanceRequests)
+          .where(eq(assistanceRequests.reasonId, id));
+
+        if ((used?.count ?? 0) > 0) {
+          return res.status(409).json({
+            error: 'Reason is linked to existing assistance requests. Mark it Inactive instead.',
+          });
+        }
+
+        await db.transaction(async (tx) => {
+          await tx.delete(assistanceReasons).where(eq(assistanceReasons.id, id));
+          await recordAudit(tx, {
+            actorUserId: auth.userAccountId,
+            actorMemberId: auth.memberId,
+            actorUsername: auth.username,
+            actorRoleCodes: auth.roles,
+            entityType: 'assistance_reason',
+            entityId: id,
+            action: 'assistance_reason_deleted',
+            oldValues: {
+              nameEn: existing.nameEn,
+              nameTa: existing.nameTa,
+              status: existing.status,
+            },
+          });
+        });
+
+        return res.json({ ok: true });
+      } catch (error: any) {
+        console.error('Delete assistance reason error:', error);
+        return res.status(500).json({ error: 'Failed to delete assistance reason.' });
+      }
+    }
+  );
+
   router.get('/assistance', requireAuth, async (req: AuthedRequest, res) => {
     try {
       const auth = req.auth!;
@@ -1703,6 +2677,22 @@ export function createApiRouter(): express.Router {
         .where(isPrivileged ? undefined : eq(assistanceRequests.requestedByUserId, auth.userAccountId))
         .orderBy(desc(assistanceRequests.createdAt))
         .limit(150);
+
+      const reasonIds = Array.from(
+        new Set(requests.map((r) => r.reasonId).filter((id): id is string => Boolean(id)))
+      );
+      const reasonRows =
+        reasonIds.length > 0
+          ? await db
+              .select({
+                id: assistanceReasons.id,
+                nameEn: assistanceReasons.nameEn,
+                nameTa: assistanceReasons.nameTa,
+              })
+              .from(assistanceReasons)
+              .where(inArray(assistanceReasons.id, reasonIds))
+          : [];
+      const reasonById = new Map(reasonRows.map((r) => [r.id, r]));
 
       const reqIds = requests.map((r) => r.id);
       const rounds =
@@ -1788,8 +2778,11 @@ export function createApiRouter(): express.Router {
           auth.memberId && eligibleSet?.has(auth.memberId) && auth.roles.includes('committee_member')
         );
 
+        const reasonMeta = reqRow.reasonId ? reasonById.get(reqRow.reasonId) : undefined;
         return {
           ...reqRow,
+          reasonNameEn: reasonMeta?.nameEn || null,
+          reasonNameTa: reasonMeta?.nameTa || null,
           round: round
             ? {
                 ...round,
@@ -1817,12 +2810,33 @@ export function createApiRouter(): express.Router {
       const auth = req.auth!;
       const body = req.body || {};
       const beneficiaryNameEn = String(body.beneficiaryNameEn || '').trim();
-      const reason = String(body.reason || '').trim();
+      const rawReasonId = typeof body.reasonId === 'string' ? body.reasonId.trim() : '';
+      const rawReasonText = String(body.reason || '').trim();
       const requestType = body.requestType === 'emergency' ? 'emergency' : 'normal';
       const currencyCode = isValidCurrency(body.currencyCode) ? body.currencyCode : 'INR';
       const amountNum = Number(body.requestedAmount);
 
-      if (!beneficiaryNameEn || !reason || !Number.isFinite(amountNum) || amountNum <= 0) {
+      let resolvedReasonId: string | null = null;
+      let resolvedReasonText = rawReasonText;
+      if (rawReasonId) {
+        if (!isValidUuid(rawReasonId)) {
+          return res.status(400).json({ error: 'Selected reason is invalid.' });
+        }
+        const [reasonRow] = await db
+          .select()
+          .from(assistanceReasons)
+          .where(and(eq(assistanceReasons.id, rawReasonId), eq(assistanceReasons.status, 'active')))
+          .limit(1);
+        if (!reasonRow) {
+          return res.status(400).json({ error: 'Selected assistance reason is inactive or not found.' });
+        }
+        resolvedReasonId = reasonRow.id;
+        resolvedReasonText = rawReasonText
+          ? `${reasonRow.nameEn} — ${rawReasonText}`
+          : reasonRow.nameEn;
+      }
+
+      if (!beneficiaryNameEn || !resolvedReasonText || !Number.isFinite(amountNum) || amountNum <= 0) {
         return res.status(400).json({
           error: 'Beneficiary name, positive amount, and reason are required.',
         });
@@ -1868,7 +2882,8 @@ export function createApiRouter(): express.Router {
             streetTa: String(body.streetTa || '').trim() || null,
             requestedAmount: amountNum.toFixed(2),
             currencyCode,
-            reason,
+            reasonId: resolvedReasonId,
+            reason: resolvedReasonText,
             requestType,
             status: initialStatus,
             createdBy: auth.userAccountId,

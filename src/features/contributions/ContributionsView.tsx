@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Check, Eye, Plus, Upload, X } from 'lucide-react';
+import { AlertTriangle, Check, Eye, Plus, Trash2, Upload, X } from 'lucide-react';
 import { apiFetch, fileToBase64Attachment } from '../../shared/api/client';
 import { AttachmentPreviewModal } from '../../shared/components/AttachmentPreviewModal';
 import { StatusText, formatMoney } from '../../shared/components/StatusText';
@@ -24,6 +24,8 @@ interface PaymentItem {
   status: string;
   rejectionReason: string | null;
   canApprove: boolean;
+  canDeleteDuplicate?: boolean;
+  isPotentialDuplicate?: boolean;
   attachments: Array<{ id: string; fileName: string; mimeType: string; sizeBytes: number }>;
 }
 
@@ -54,10 +56,12 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
   lang,
 }) => {
   const t = translations[lang];
+  const isAdmin = user.roles.includes('admin');
   const isCommitteeOrAdmin = user.roles.some((r) => r === 'committee_member' || r === 'admin');
   const [subTab, setSubTab] = useState<'payments' | 'dues'>('payments');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [payments, setPayments] = useState<PaymentItem[]>([]);
+  const [duplicateCount, setDuplicateCount] = useState<number>(0);
   const [dues, setDues] = useState<DueItem[]>([]);
   const [membersList, setMembersList] = useState<MemberOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,14 +84,17 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
     fileDataBase64: string;
   } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [duplicatePrompt, setDuplicatePrompt] = useState<string | null>(null);
 
   // Dues generator
   const [genMonth, setGenMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [genBusy, setGenBusy] = useState(false);
 
-  // Reject modal & Preview modal
+  // Reject modal, Duplicate removal modal & Preview modal
   const [rejectTarget, setRejectTarget] = useState<PaymentItem | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<PaymentItem | null>(null);
+  const [deleteReason, setDeleteReason] = useState('');
   const [previewAtt, setPreviewAtt] = useState<{ id: string; fileName: string } | null>(null);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
 
@@ -95,12 +102,20 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
     setLoading(true);
     setError(null);
     try {
-      const qs = statusFilter !== 'all' ? `?status=${encodeURIComponent(statusFilter)}` : '';
+      const qs =
+        statusFilter === 'duplicates'
+          ? '?duplicatesOnly=true'
+          : statusFilter !== 'all'
+            ? `?status=${encodeURIComponent(statusFilter)}`
+            : '';
       const [payRes, dueRes] = await Promise.all([
-        apiFetch<{ payments: PaymentItem[] }>(`/api/contributions/payments${qs}`),
+        apiFetch<{ payments: PaymentItem[]; duplicateCount?: number }>(
+          `/api/contributions/payments${qs}`
+        ),
         apiFetch<{ dues: DueItem[] }>('/api/contributions/dues'),
       ]);
       setPayments(payRes.payments);
+      setDuplicateCount(payRes.duplicateCount ?? 0);
       setDues(dueRes.dues);
 
       if (isCommitteeOrAdmin) {
@@ -134,8 +149,7 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
     }
   };
 
-  const handleSubmitPayment = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitPaymentRequest = async (confirmDuplicate: boolean) => {
     setSubmitting(true);
     setError(null);
     setNotice(null);
@@ -152,9 +166,11 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
           transactionReference: formRef,
           notes: formNotes,
           attachment: formAttachment,
+          confirmDuplicate,
         }),
       });
       setShowForm(false);
+      setDuplicatePrompt(null);
       setFormAmount('');
       setFormRef('');
       setFormNotes('');
@@ -162,10 +178,20 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
       setNotice('Payment submitted as Pending Verification. Another committee member must approve it.');
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to submit payment.');
+      if (err?.code === 'POTENTIAL_DUPLICATE') {
+        setDuplicatePrompt(err.message);
+      } else {
+        setDuplicatePrompt(null);
+        setError(err.message || 'Failed to submit payment.');
+      }
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmitPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitPaymentRequest(false);
   };
 
   const handleApprove = async (item: PaymentItem) => {
@@ -221,6 +247,35 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
     }
   };
 
+  const handleDeleteDuplicateConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!deleteTarget) return;
+    setActionBusyId(deleteTarget.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiFetch<{
+        mode: 'deleted' | 'reversed';
+        reversalTransactionNumber?: string;
+      }>(`/api/contributions/payments/${deleteTarget.id}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ reason: deleteReason }),
+      });
+      setDeleteTarget(null);
+      setDeleteReason('');
+      setNotice(
+        res.mode === 'reversed'
+          ? `Duplicate payment cancelled and ledger reversed (${res.reversalTransactionNumber}).`
+          : 'Duplicate payment removed and recorded in audit trail.'
+      );
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to remove duplicate payment.');
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
   const handleGenerateDues = async () => {
     setGenBusy(true);
     setError(null);
@@ -246,9 +301,6 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
             {t.contributions}
           </h1>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Separation of duties enforced: payment creators cannot self-approve submissions.
-          </p>
         </div>
 
         <button
@@ -437,10 +489,39 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
             </div>
           </div>
 
+          {duplicatePrompt && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>{duplicatePrompt}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDuplicatePrompt(null)}
+                  className="rounded-md border border-amber-300 px-3 py-1 text-xs font-medium hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900/40"
+                >
+                  {t.cancel}
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => submitPaymentRequest(true)}
+                  className="rounded-md bg-amber-700 px-3 py-1 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-60"
+                >
+                  {t.confirmSubmitDuplicate}
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="mt-4 flex justify-end gap-2">
             <button
               type="button"
-              onClick={() => setShowForm(false)}
+              onClick={() => {
+                setShowForm(false);
+                setDuplicatePrompt(null);
+              }}
               className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
             >
               {t.cancel}
@@ -484,19 +565,31 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
         </div>
 
         {subTab === 'payments' ? (
-          <div className="inline-flex rounded-lg bg-slate-100 p-1 dark:bg-slate-900">
-            {['all', 'pending', 'approved', 'rejected'].map((st) => (
+          <div className="inline-flex flex-wrap rounded-lg bg-slate-100 p-1 dark:bg-slate-900">
+            {['all', 'pending', 'approved', 'rejected', 'cancelled', 'duplicates'].map((st) => (
               <button
                 key={st}
                 type="button"
                 onClick={() => setStatusFilter(st)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition ${
+                className={`inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium capitalize transition ${
                   statusFilter === st
                     ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-800 dark:text-white'
-                    : 'text-slate-600 dark:text-slate-400'
+                    : st === 'duplicates' && duplicateCount > 0
+                      ? 'text-amber-700 dark:text-amber-400'
+                      : 'text-slate-600 dark:text-slate-400'
                 }`}
               >
-                {st}
+                {st === 'duplicates' ? (
+                  <>
+                    <AlertTriangle className="h-3 w-3" />
+                    <span>
+                      {t.duplicatesOnly}
+                      {duplicateCount > 0 ? ` (${duplicateCount})` : ''}
+                    </span>
+                  </>
+                ) : (
+                  st
+                )}
               </button>
             ))}
           </div>
@@ -556,8 +649,16 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
                         <div className="text-[11px] text-slate-500">{p.paymentMethod}</div>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="font-mono text-slate-800 dark:text-slate-200">
-                          {p.transactionReference}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono text-slate-800 dark:text-slate-200">
+                            {p.transactionReference}
+                          </span>
+                          {p.isPotentialDuplicate && (
+                            <span className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+                              <AlertTriangle className="h-2.5 w-2.5" />
+                              <span>{t.duplicateBadge}</span>
+                            </span>
+                          )}
                         </div>
                         {p.rejectionReason && (
                           <div className="mt-0.5 text-[11px] text-red-600">
@@ -572,48 +673,67 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
                         <StatusText status={p.status} lang={lang} />
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <div className="inline-flex items-center justify-end gap-2">
+                        <div className="inline-flex items-center justify-end gap-1.5">
                           {p.attachments.map((att) => (
                             <button
                               key={att.id}
                               type="button"
                               onClick={() => setPreviewAtt({ id: att.id, fileName: att.fileName })}
-                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
+                              title={att.fileName}
+                              aria-label={att.fileName}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                             >
-                              <Eye className="h-3 w-3" />
-                              <span>Proof</span>
+                              <Eye className="h-3.5 w-3.5" />
                             </button>
                           ))}
 
                           {p.status === 'pending' && isCommitteeOrAdmin && (
                             <>
-                              {p.canApprove ? (
+                              {p.canApprove && (
                                 <button
                                   type="button"
                                   disabled={actionBusyId === p.id}
                                   onClick={() => handleApprove(p)}
-                                  className="inline-flex items-center gap-1 rounded-md bg-emerald-800 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
+                                  title={t.approve}
+                                  aria-label={t.approve}
+                                  className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-emerald-800 text-white hover:bg-emerald-900 disabled:opacity-50"
                                 >
-                                  <Check className="h-3 w-3" />
-                                  <span>{t.approve}</span>
+                                  <Check className="h-3.5 w-3.5" />
                                 </button>
-                              ) : (
-                                <span className="text-[11px] text-slate-400">
-                                  Creator cannot self-approve
-                                </span>
                               )}
 
                               <button
                                 type="button"
                                 disabled={actionBusyId === p.id}
                                 onClick={() => setRejectTarget(p)}
-                                className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400"
+                                title={t.reject}
+                                aria-label={t.reject}
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/40"
                               >
-                                <X className="h-3 w-3" />
-                                <span>{t.reject}</span>
+                                <X className="h-3.5 w-3.5" />
                               </button>
                             </>
                           )}
+
+                          {isAdmin &&
+                            (p.canDeleteDuplicate ||
+                              ['pending', 'approved', 'rejected'].includes(p.status)) && (
+                              <button
+                                type="button"
+                                disabled={actionBusyId === p.id}
+                                onClick={() => {
+                                  setDeleteTarget(p);
+                                  setDeleteReason(
+                                    p.isPotentialDuplicate ? 'Duplicate transaction submission' : ''
+                                  );
+                                }}
+                                title={t.removeDuplicate}
+                                aria-label={t.removeDuplicate}
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/40"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                         </div>
                       </td>
                     </tr>
@@ -704,6 +824,63 @@ export const ContributionsView: React.FC<{ user: UserSession; lang: Language }> 
                 className="rounded-lg bg-red-700 px-4 py-2 text-xs font-medium text-white hover:bg-red-800"
               >
                 Confirm Rejection
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Remove Duplicate Confirmation Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <form
+            onSubmit={handleDeleteDuplicateConfirm}
+            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"
+          >
+            <h3 className="text-base font-semibold text-slate-900 dark:text-white">
+              {t.removeDuplicateTitle}
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">
+              {deleteTarget.memberNameEn} · {deleteTarget.paymentDate} ·{' '}
+              {formatMoney(deleteTarget.amount, deleteTarget.currencyCode)} ·{' '}
+              <span className="font-mono">{deleteTarget.transactionReference}</span>
+            </p>
+            <div
+              className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+                deleteTarget.status === 'approved'
+                  ? 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200'
+                  : 'border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300'
+              }`}
+            >
+              {deleteTarget.status === 'approved'
+                ? t.duplicatePostedWarning
+                : t.duplicatePendingHint}
+            </div>
+            <textarea
+              rows={3}
+              required
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              placeholder={t.duplicateReasonPlaceholder}
+              className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteTarget(null);
+                  setDeleteReason('');
+                }}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-medium text-slate-700 dark:border-slate-700 dark:text-slate-200"
+              >
+                {t.cancel}
+              </button>
+              <button
+                type="submit"
+                disabled={actionBusyId === deleteTarget.id}
+                className="rounded-lg bg-red-700 px-4 py-2 text-xs font-medium text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                {t.removeDuplicate}
               </button>
             </div>
           </form>

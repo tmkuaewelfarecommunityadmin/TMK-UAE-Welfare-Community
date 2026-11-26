@@ -102,7 +102,9 @@ export const MonthlyContributionTrendsChart: React.FC<{
   trends: MonthlyTrendPoint[];
   lang: Language;
   loading?: boolean;
-}> = ({ trends, lang, loading = false }) => {
+  period?: 'all_time' | 'yearly' | 'monthly';
+  periodLabel?: string;
+}> = ({ trends, lang, loading = false, period = 'all_time', periodLabel }) => {
   const t = translations[lang];
   const [currencyView, setCurrencyView] = useState<CurrencyView>('both');
 
@@ -129,12 +131,29 @@ export const MonthlyContributionTrendsChart: React.FC<{
     [trends]
   );
 
+  const chartHeading =
+    period === 'yearly' && periodLabel
+      ? `${periodLabel} · ${t.yearlyTrendsTitle}`
+      : period === 'monthly' && periodLabel
+        ? `${t.monthlyContributionTrends} (${periodLabel})`
+        : t.monthlyContributionTrends;
+
+  const inrSummaryLabel =
+    period === 'yearly' && periodLabel
+      ? `${periodLabel} ${t.periodInrTotal}`
+      : t.sixMonthInrTotal;
+
+  const aedSummaryLabel =
+    period === 'yearly' && periodLabel
+      ? `${periodLabel} ${t.periodAedTotal}`
+      : t.sixMonthAedTotal;
+
   return (
     <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-800">
         <div>
           <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-            {t.monthlyContributionTrends}
+            {chartHeading}
           </h2>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             {t.monthlyTrendsSubtitle}
@@ -172,12 +191,12 @@ export const MonthlyContributionTrendsChart: React.FC<{
         </div>
       </div>
 
-      {/* Separated 6-month totals */}
+      {/* Separated period totals */}
       <div className="grid grid-cols-1 gap-3 border-b border-slate-100 px-5 py-3 sm:grid-cols-2 dark:border-slate-800/80">
         <div className="flex items-center justify-between rounded-lg border border-slate-200/80 bg-slate-50/70 px-3.5 py-2 dark:border-slate-800 dark:bg-slate-950/60">
           <span className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
             <span className="h-2.5 w-2.5 rounded-xs bg-emerald-600" />
-            {t.sixMonthInrTotal}
+            {inrSummaryLabel}
           </span>
           <span className="font-mono text-sm font-semibold tabular-nums text-emerald-800 dark:text-emerald-400">
             {formatMoney(sixMonthInr, 'INR')}
@@ -186,7 +205,7 @@ export const MonthlyContributionTrendsChart: React.FC<{
         <div className="flex items-center justify-between rounded-lg border border-slate-200/80 bg-slate-50/70 px-3.5 py-2 dark:border-slate-800 dark:bg-slate-950/60">
           <span className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
             <span className="h-2.5 w-2.5 rounded-xs bg-sky-600" />
-            {t.sixMonthAedTotal}
+            {aedSummaryLabel}
           </span>
           <span className="font-mono text-sm font-semibold tabular-nums text-sky-800 dark:text-sky-400">
             {formatMoney(sixMonthAed, 'AED')}

@@ -1,5 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, KeyRound, Plus, Search, Shield, UserCheck, UserX, XCircle } from 'lucide-react';
+import {
+  CheckCircle2,
+  KeyRound,
+  Pencil,
+  Plus,
+  Search,
+  Shield,
+  UserCheck,
+  UserX,
+  XCircle,
+} from 'lucide-react';
 import { apiFetch } from '../../shared/api/client';
 import { formatMoney } from '../../shared/components/StatusText';
 import type { Language } from '../../shared/i18n/translations';
@@ -268,10 +278,6 @@ export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ u
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
             {t.members}
           </h1>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Bilingual member directory. Members can exist without login; role assignment is Admin
-            only.
-          </p>
         </div>
 
         {canEditMembers && (
@@ -411,20 +417,23 @@ export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ u
                             <button
                               type="button"
                               onClick={() => openEditModal(m)}
-                              className="rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
+                              title={t.edit}
+                              aria-label={t.edit}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                             >
-                              Edit
+                              <Pencil className="h-3.5 w-3.5" />
                             </button>
                             <button
                               type="button"
                               onClick={() => handleToggleStatus(m)}
                               title={m.status === 'active' ? 'Deactivate' : 'Reactivate'}
-                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+                              aria-label={m.status === 'active' ? 'Deactivate' : 'Reactivate'}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
                             >
                               {m.status === 'active' ? (
-                                <UserX className="h-3 w-3" />
+                                <UserX className="h-3.5 w-3.5" />
                               ) : (
-                                <UserCheck className="h-3 w-3" />
+                                <UserCheck className="h-3.5 w-3.5" />
                               )}
                             </button>
                           </>
@@ -433,10 +442,11 @@ export const MembersView: React.FC<{ user: UserSession; lang: Language }> = ({ u
                           <button
                             type="button"
                             onClick={() => openAccessModal(m)}
-                            className="inline-flex items-center gap-1 rounded-md bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 dark:bg-emerald-800"
+                            title="Login & Roles"
+                            aria-label="Login & Roles"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-slate-900 text-white hover:bg-slate-800 dark:bg-emerald-800 dark:hover:bg-emerald-700"
                           >
-                            <Shield className="h-3 w-3" />
-                            <span>Login &amp; Roles</span>
+                            <Shield className="h-3.5 w-3.5" />
                           </button>
                         )}
                       </div>

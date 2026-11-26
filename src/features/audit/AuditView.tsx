@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Download, Filter } from 'lucide-react';
+import { Download, Eye, EyeOff, Filter } from 'lucide-react';
 import { apiFetch, getActiveBearerToken } from '../../shared/api/client';
 import type { Language } from '../../shared/i18n/translations';
 import { translations } from '../../shared/i18n/translations';
@@ -100,18 +100,16 @@ export const AuditView: React.FC<{ lang: Language }> = ({ lang }) => {
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
             {t.audit}
           </h1>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Append-only audit log with role-at-action-time snapshots. Read-only.
-          </p>
         </div>
 
         <button
           type="button"
           onClick={handleExportCsv}
-          className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 whitespace-nowrap"
+          title="Export CSV"
+          aria-label="Export CSV"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
         >
-          <Download className="h-3.5 w-3.5" />
-          <span>Export CSV Report</span>
+          <Download className="h-4 w-4" />
         </button>
       </div>
 
@@ -281,9 +279,15 @@ export const AuditView: React.FC<{ lang: Language }> = ({ lang }) => {
                         <button
                           type="button"
                           onClick={() => setExpandedId(expandedId === row.id ? null : row.id)}
-                          className="text-xs font-medium text-emerald-800 hover:underline dark:text-emerald-400"
+                          title={expandedId === row.id ? 'Hide Payload' : 'Inspect Diff'}
+                          aria-label={expandedId === row.id ? 'Hide Payload' : 'Inspect Diff'}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-emerald-800 hover:bg-slate-50 dark:border-slate-700 dark:text-emerald-400 dark:hover:bg-slate-800"
                         >
-                          {expandedId === row.id ? 'Hide Payload' : 'Inspect Diff'}
+                          {expandedId === row.id ? (
+                            <EyeOff className="h-3.5 w-3.5" />
+                          ) : (
+                            <Eye className="h-3.5 w-3.5" />
+                          )}
                         </button>
                       </td>
                     </tr>

@@ -1,15 +1,27 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { signInWithPopup } from 'firebase/auth';
-import { Check, Copy, Globe, KeyRound, Search, ShieldCheck, Upload } from 'lucide-react';
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Globe,
+  KeyRound,
+  Search,
+  ShieldCheck,
+  Upload,
+} from 'lucide-react';
 import { auth, googleAuthProvider } from '../../lib/firebase';
 import { apiFetch, fileToBase64Attachment, setMemorySessionToken } from '../../shared/api/client';
 import { StatusText, formatMoney } from '../../shared/components/StatusText';
 import type { Language } from '../../shared/i18n/translations';
 import { translations } from '../../shared/i18n/translations';
 import { PWAInstallButton } from '../../shared/pwa/PWAInstall';
+import type { SiteConfig } from '../../shared/siteConfig';
 
 interface AuthPortalProps {
   lang: Language;
+  siteConfig: SiteConfig | null;
   onToggleLang: () => void;
   onPasswordLoginSuccess: () => Promise<void>;
   externalError?: string | null;
@@ -17,12 +29,15 @@ interface AuthPortalProps {
 
 export const AuthPortal: React.FC<AuthPortalProps> = ({
   lang,
+  siteConfig,
   onToggleLang,
   onPasswordLoginSuccess,
   externalError,
 }) => {
   const t = translations[lang];
   const [section, setSection] = useState<'overview' | 'signin' | 'assistance' | 'track'>('overview');
+  const [slideIndex, setSlideIndex] = useState(0);
+  const [sliderPaused, setSliderPaused] = useState(false);
 
   // Sign-In state
   const [username, setUsername] = useState('');
@@ -46,6 +61,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const [reqAmount, setReqAmount] = useState('');
   const [reqCurrency, setReqCurrency] = useState<'INR' | 'AED'>('INR');
   const [reqType, setReqType] = useState<'normal' | 'emergency'>('normal');
+  const [reasonOptions, setReasonOptions] = useState<
+    Array<{ id: string; nameEn: string; nameTa: string; status: string }>
+  >([]);
+  const [reqReasonId, setReqReasonId] = useState('');
   const [reqReason, setReqReason] = useState('');
   const [reqAttachment, setReqAttachment] = useState<{
     fileName: string;
@@ -82,6 +101,53 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   } | null>(null);
 
   const displayedAuthError = useMemo(() => authError || externalError, [authError, externalError]);
+
+  const slides = useMemo(() => siteConfig?.sliderPhotos || [], [siteConfig]);
+  const highlights = useMemo(() => siteConfig?.highlights || [], [siteConfig]);
+  const appTitle =
+    lang === 'ta'
+      ? siteConfig?.appTitleTa || t.appName
+      : siteConfig?.appTitleEn || t.appName;
+  const heroBadge =
+    lang === 'ta'
+      ? siteConfig?.heroBadgeTa || 'தமிழ் & English · INR & AED'
+      : siteConfig?.heroBadgeEn || 'English & தமிழ் · INR & AED';
+  const heroSubtitle =
+    lang === 'ta'
+      ? siteConfig?.heroSubtitleTa || t.appSubtitle
+      : siteConfig?.heroSubtitleEn || t.appSubtitle;
+
+  useEffect(() => {
+    if (slides.length <= 1 || sliderPaused || section !== 'overview') return;
+    const timer = window.setInterval(() => {
+      setSlideIndex((prev) => (prev + 1) % slides.length);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [slides.length, sliderPaused, section]);
+
+  useEffect(() => {
+    if (slideIndex >= slides.length) {
+      setSlideIndex(0);
+    }
+  }, [slides.length, slideIndex]);
+
+  useEffect(() => {
+    if (section !== 'assistance') return;
+    let active = true;
+    apiFetch<{ reasons: Array<{ id: string; nameEn: string; nameTa: string; status: string }> }>(
+      '/api/public/assistance-reasons',
+      { skipAuth: true }
+    )
+      .then((res) => {
+        if (active) setReasonOptions(res.reasons || []);
+      })
+      .catch(() => {
+        // Keep empty list gracefully if offline
+      });
+    return () => {
+      active = false;
+    };
+  }, [section]);
 
   const handleGoogleSignIn = async () => {
     setAuthError(null);
@@ -171,6 +237,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           requestedAmount: Number(reqAmount),
           currencyCode: reqCurrency,
           requestType: reqType,
+          reasonId: reqReasonId,
           reason: reqReason,
           attachment: reqAttachment,
           captchaA: captchaSeed.a,
@@ -188,6 +255,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
       setFamilyNameEn('');
       setStreetEn('');
       setReqAmount('');
+      setReqReasonId('');
       setReqReason('');
       setReqAttachment(null);
       setCaptchaInput('');
@@ -228,9 +296,16 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-8 px-4 py-3.5 sm:px-6">
           <a
             href="/"
-            className="font-display text-lg font-bold tracking-tight text-emerald-900 whitespace-nowrap shrink-0 dark:text-emerald-400"
+            className="flex items-center gap-2.5 font-display text-lg font-bold tracking-tight text-emerald-900 whitespace-nowrap shrink-0 dark:text-emerald-400"
           >
-            {t.appName}
+            {siteConfig?.logoDataUrl && (
+              <img
+                src={siteConfig.logoDataUrl}
+                alt={appTitle}
+                className="h-8 w-8 rounded-lg border border-slate-200 object-contain bg-white p-0.5 dark:border-slate-700"
+              />
+            )}
+            <span>{appTitle}</span>
           </a>
 
           <nav className="hidden items-center gap-6 text-sm font-medium text-slate-600 md:flex dark:text-slate-300">
@@ -264,10 +339,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             <button
               type="button"
               onClick={onToggleLang}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 dark:hover:text-white"
+              title={t.languageLabel}
+              aria-label={t.languageLabel}
+              className="inline-flex items-center gap-1 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 dark:hover:text-white"
             >
               <Globe className="h-3.5 w-3.5" />
-              <span>{t.languageLabel}</span>
+              <span>{lang === 'en' ? 'த' : 'EN'}</span>
             </button>
           </nav>
 
@@ -275,10 +352,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             <button
               type="button"
               onClick={onToggleLang}
-              className="inline-flex min-h-[40px] items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 md:hidden dark:border-slate-700 dark:text-slate-200"
+              title={t.languageLabel}
+              aria-label={t.languageLabel}
+              className="inline-flex min-h-[40px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700 md:hidden dark:border-slate-700 dark:text-slate-200"
             >
               <Globe className="h-3.5 w-3.5" />
-              <span>{t.languageLabel}</span>
+              <span>{lang === 'en' ? 'த' : 'EN'}</span>
             </button>
             <PWAInstallButton label={t.installApp} />
             <button
@@ -330,7 +409,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:py-12">
         {section === 'overview' && (
-          <div className="mx-auto max-w-5xl space-y-10">
+          <div className="mx-auto max-w-5xl space-y-8">
             {displayedAuthError && (
               <div
                 role="alert"
@@ -342,57 +421,109 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
             {/* Editorial Overview */}
             <div>
-              <p className="text-xs font-medium text-emerald-800 dark:text-emerald-400">
-                Tamil &amp; English · INR &amp; AED Separate Ledgers · Committee Governance
-              </p>
-              <h1 className="mt-3 max-w-2xl font-display text-3xl font-bold tracking-tight text-slate-900 [text-wrap:balance] sm:text-5xl dark:text-white">
-                {t.appName}
+              {heroBadge && (
+                <p className="text-xs font-medium text-emerald-800 dark:text-emerald-400">
+                  {heroBadge}
+                </p>
+              )}
+              <h1 className="mt-2 max-w-2xl font-display text-3xl font-bold tracking-tight text-slate-900 [text-wrap:balance] sm:text-5xl dark:text-white">
+                {appTitle}
               </h1>
-              <p className="mt-4 max-w-2xl text-base leading-relaxed text-slate-600 dark:text-slate-300">
-                {t.appSubtitle}. Built for village members, committee reviewers, treasurers, and
-                auditors with separation of duties, immutable double-entry postings, and monthly UAE
-                remittance settlements.
+              <p className="mt-3 max-w-2xl text-base leading-relaxed text-slate-600 dark:text-slate-300">
+                {heroSubtitle}
               </p>
             </div>
 
-            <div className="grid grid-cols-1 gap-8 border-t border-slate-200 pt-8 sm:grid-cols-2 dark:border-slate-800">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  01. Verified Contributions &amp; Separation of Duties
-                </h2>
-                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                  Member payment submissions and collector entries require independent committee
-                  approval before updating ledger balances.
-                </p>
+            {/* Multi-Photo Slider */}
+            {slides.length > 0 && (
+              <div
+                className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-900 dark:border-slate-800"
+                onMouseEnter={() => setSliderPaused(true)}
+                onMouseLeave={() => setSliderPaused(false)}
+              >
+                <div className="relative aspect-[16/9] max-h-[420px] w-full">
+                  {slides.map((slide, idx) => (
+                    <div
+                      key={slide.id}
+                      className={`absolute inset-0 transition-opacity duration-500 ${
+                        idx === slideIndex ? 'opacity-100' : 'pointer-events-none opacity-0'
+                      }`}
+                    >
+                      <img
+                        src={slide.imageDataUrl}
+                        alt={
+                          (lang === 'ta' ? slide.captionTa : slide.captionEn) ||
+                          `${appTitle} ${idx + 1}`
+                        }
+                        className="h-full w-full object-cover"
+                      />
+                      {(slide.captionEn || slide.captionTa) && (
+                        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/85 via-slate-950/40 to-transparent px-5 pb-4 pt-12">
+                          <p className="text-sm font-medium text-white">
+                            {lang === 'ta'
+                              ? slide.captionTa || slide.captionEn
+                              : slide.captionEn || slide.captionTa}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {slides.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSlideIndex((prev) => (prev - 1 + slides.length) % slides.length)
+                      }
+                      aria-label="Previous slide"
+                      className="absolute left-3 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full border border-white/25 bg-slate-950/55 text-white backdrop-blur-sm transition hover:bg-slate-950/80"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSlideIndex((prev) => (prev + 1) % slides.length)}
+                      aria-label="Next slide"
+                      className="absolute right-3 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full border border-white/25 bg-slate-950/55 text-white backdrop-blur-sm transition hover:bg-slate-950/80"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                    <div className="absolute bottom-3.5 right-4 flex items-center gap-1.5">
+                      {slides.map((s, idx) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => setSlideIndex(idx)}
+                          aria-label={`Slide ${idx + 1}`}
+                          className={`h-2 rounded-full transition-all ${
+                            idx === slideIndex ? 'w-5 bg-white' : 'w-2 bg-white/45 hover:bg-white/75'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  02. Committee Assistance Thresholds
-                </h2>
-                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                  Normal assistance requires 50% approval from frozen eligible committee voters;
-                  emergency cases resolve with 1 verified approval before Treasurer payout.
-                </p>
+            )}
+
+            {/* Highlights Grid */}
+            {highlights.length > 0 && (
+              <div className="grid grid-cols-1 gap-6 border-t border-slate-200 pt-7 sm:grid-cols-2 dark:border-slate-800">
+                {highlights.map((item, idx) => (
+                  <div key={item.id}>
+                    <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                      {String(idx + 1).padStart(2, '0')}.{' '}
+                      {lang === 'ta' ? item.titleTa || item.titleEn : item.titleEn}
+                    </h2>
+                    <p className="mt-1 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                      {lang === 'ta' ? item.bodyTa || item.bodyEn : item.bodyEn}
+                    </p>
+                  </div>
+                ))}
               </div>
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  03. Monthly UAE AED-to-INR Settlement
-                </h2>
-                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                  INR and AED accounts are reconciled separately. Monthly AED transfers convert
-                  without double-counting contribution income.
-                </p>
-              </div>
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  04. Append-Only Role-Snapshot Audit
-                </h2>
-                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                  Every approval, payout, settlement, and member edit preserves actor identity
-                  and historical role snapshot at the time of action.
-                </p>
-              </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -682,11 +813,30 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
                   {t.reason} *
                 </label>
+                <select
+                  required
+                  value={reqReasonId}
+                  onChange={(e) => setReqReasonId(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+                >
+                  <option value="">{t.selectReason}</option>
+                  {reasonOptions.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {lang === 'ta' ? r.nameTa : r.nameEn}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  {t.reasonDetails}
+                </label>
                 <textarea
                   rows={3}
-                  required
                   value={reqReason}
                   onChange={(e) => setReqReason(e.target.value)}
+                  placeholder={lang === 'ta' ? 'தேவைப்பட்டால் கூடுதல் விவரங்களை உள்ளிடவும்...' : 'Optional context or case notes...'}
                   className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>

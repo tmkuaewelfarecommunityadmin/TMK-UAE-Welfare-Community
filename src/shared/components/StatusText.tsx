@@ -14,6 +14,7 @@ export const StatusText: React.FC<{ status: string; lang: Language }> = ({ statu
     posted: { label: t.statusApproved, colorClass: 'text-emerald-800 dark:text-emerald-400', Icon: CheckCircle2 },
     confirmed: { label: t.statusApproved, colorClass: 'text-emerald-800 dark:text-emerald-400', Icon: CheckCircle2 },
     rejected: { label: t.statusRejected, colorClass: 'text-red-700 dark:text-red-400', Icon: XCircle },
+    cancelled: { label: t.statusCancelled, colorClass: 'text-slate-500 dark:text-slate-400', Icon: XCircle },
     reversed: { label: t.statusReversed, colorClass: 'text-red-700 dark:text-red-400', Icon: RotateCcw },
     active: { label: t.statusActive, colorClass: 'text-emerald-800 dark:text-emerald-400', Icon: CheckCircle2 },
     inactive: { label: t.statusInactive, colorClass: 'text-slate-500 dark:text-slate-400', Icon: XCircle },

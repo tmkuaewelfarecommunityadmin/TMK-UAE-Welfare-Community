@@ -250,9 +250,6 @@ export const TreasuryView: React.FC<{ user: UserSession; lang: Language }> = ({ 
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
             {t.treasury}
           </h1>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Immutable double-entry ledger. INR and AED accounts reconcile independently.
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -488,10 +485,11 @@ export const TreasuryView: React.FC<{ user: UserSession; lang: Language }> = ({ 
                             setReverseTarget(txn);
                             setReverseReason('');
                           }}
-                          className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400"
+                          title={t.reverse}
+                          aria-label={t.reverse}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/40"
                         >
-                          <RotateCcw className="h-3 w-3" />
-                          <span>{t.reverse}</span>
+                          <RotateCcw className="h-3.5 w-3.5" />
                         </button>
                       )}
                   </div>

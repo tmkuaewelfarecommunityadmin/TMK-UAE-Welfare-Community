@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, sql } from 'drizzle-orm';
 import type { db as DbType } from '../db/index.ts';
 import { fundAccounts, fundTransactions, ledgerEntries } from '../db/schema.ts';
 
@@ -147,16 +147,35 @@ export interface AccountBalanceRow {
   balance: string;
 }
 
-export async function getAccountBalances(executor: DbExecutor): Promise<AccountBalanceRow[]> {
+export async function getAccountBalances(
+  executor: DbExecutor,
+  dateRange?: { startDate: string; endDate: string }
+): Promise<AccountBalanceRow[]> {
   const accounts = await executor.select().from(fundAccounts).orderBy(fundAccounts.accountCode);
-  const sums = await executor
-    .select({
-      fundAccountId: ledgerEntries.fundAccountId,
-      side: ledgerEntries.side,
-      total: sql<string>`COALESCE(SUM(${ledgerEntries.transactionAmount}), 0)`,
-    })
-    .from(ledgerEntries)
-    .groupBy(ledgerEntries.fundAccountId, ledgerEntries.side);
+  const sums = dateRange
+    ? await executor
+        .select({
+          fundAccountId: ledgerEntries.fundAccountId,
+          side: ledgerEntries.side,
+          total: sql<string>`COALESCE(SUM(${ledgerEntries.transactionAmount}), 0)`,
+        })
+        .from(ledgerEntries)
+        .innerJoin(fundTransactions, eq(ledgerEntries.fundTransactionId, fundTransactions.id))
+        .where(
+          and(
+            gte(fundTransactions.transactionDate, dateRange.startDate),
+            lte(fundTransactions.transactionDate, dateRange.endDate)
+          )
+        )
+        .groupBy(ledgerEntries.fundAccountId, ledgerEntries.side)
+    : await executor
+        .select({
+          fundAccountId: ledgerEntries.fundAccountId,
+          side: ledgerEntries.side,
+          total: sql<string>`COALESCE(SUM(${ledgerEntries.transactionAmount}), 0)`,
+        })
+        .from(ledgerEntries)
+        .groupBy(ledgerEntries.fundAccountId, ledgerEntries.side);
 
   const debitMap = new Map<string, number>();
   const creditMap = new Map<string, number>();

@@ -16,6 +16,8 @@ export interface AuthContext {
   email: string | null;
   fullNameEn: string;
   fullNameTa: string | null;
+  avatarUrl: string | null;
+  preferredLanguage: 'en' | 'ta';
   roles: RoleCode[];
 }
 
@@ -141,6 +143,8 @@ export async function resolveAuthFromToken(token: string): Promise<AuthContext |
       email: account.recoveryEmail || member?.email || null,
       fullNameEn: member?.fullNameEn || account.username,
       fullNameTa: member?.fullNameTa || null,
+      avatarUrl: account.avatarDataUrl || null,
+      preferredLanguage: account.preferredLanguage === 'ta' ? 'ta' : 'en',
       roles: assignedRoles,
     };
   }
@@ -209,6 +213,8 @@ export async function resolveAuthFromToken(token: string): Promise<AuthContext |
     email: account.recoveryEmail || member?.email || decoded.email || null,
     fullNameEn: member?.fullNameEn || decoded.name || account.username,
     fullNameTa: member?.fullNameTa || null,
+    avatarUrl: account.avatarDataUrl || null,
+    preferredLanguage: account.preferredLanguage === 'ta' ? 'ta' : 'en',
     roles: assignedRoles,
   };
 }

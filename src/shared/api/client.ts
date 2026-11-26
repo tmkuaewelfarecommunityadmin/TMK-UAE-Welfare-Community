@@ -41,11 +41,13 @@ export async function apiFetch<T = any>(
   const contentType = res.headers.get('content-type') || '';
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let code: string | undefined;
     if (contentType.includes('application/json')) {
       const errJson = await res.json().catch(() => null);
       if (errJson?.error) message = errJson.error;
+      if (errJson?.code) code = String(errJson.code);
     }
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: res.status, code });
   }
 
   if (contentType.includes('application/json')) {

@@ -16,10 +16,16 @@ export interface UserSession {
   email: string | null;
   fullNameEn: string;
   fullNameTa: string | null;
+  avatarUrl?: string | null;
+  preferredLanguage?: 'en' | 'ta';
   roles: Array<'admin' | 'committee_member' | 'treasurer' | 'member' | 'auditor'>;
 }
 
+type DashboardPeriod = 'all_time' | 'yearly' | 'monthly';
+
 interface DashboardData {
+  period: DashboardPeriod;
+  year: string;
   month: string;
   balances: {
     inrTotal: string;
@@ -40,6 +46,7 @@ interface DashboardData {
     pendingAssistance?: number;
     approvedAwaitingPayout?: number;
     monthlyCollections: Array<{ currencyCode: string; total: string; count: number }>;
+    periodCollections?: Array<{ currencyCode: string; total: string; count: number }>;
     monthlyTrends: MonthlyTrendPoint[];
   };
   ownSummary: {
@@ -77,6 +84,11 @@ export const DashboardView: React.FC<{
   onNavigate: (tab: string) => void;
 }> = ({ user, lang, onNavigate }) => {
   const t = translations[lang];
+  const currentYear = new Date().getUTCFullYear();
+  const yearOptions = Array.from({ length: 6 }, (_, idx) => String(currentYear - idx));
+
+  const [period, setPeriod] = useState<DashboardPeriod>('all_time');
+  const [year, setYear] = useState(() => String(currentYear));
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -86,21 +98,29 @@ export const DashboardView: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<DashboardData>(`/api/dashboard?month=${encodeURIComponent(month)}`);
+      const params = new URLSearchParams({ period, year, month });
+      const res = await apiFetch<DashboardData>(`/api/dashboard?${params.toString()}`);
       setData(res);
     } catch (err: any) {
       setError(err.message || 'Failed to load dashboard.');
     } finally {
       setLoading(false);
     }
-  }, [month]);
+  }, [period, year, month]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const inrCollection = data?.communitySummary.monthlyCollections.find((c) => c.currencyCode === 'INR');
-  const aedCollection = data?.communitySummary.monthlyCollections.find((c) => c.currencyCode === 'AED');
+  const activeCollections =
+    data?.communitySummary.periodCollections ?? data?.communitySummary.monthlyCollections ?? [];
+  const inrCollection = activeCollections.find((c) => c.currencyCode === 'INR');
+  const aedCollection = activeCollections.find((c) => c.currencyCode === 'AED');
+
+  const activePeriodLabel =
+    period === 'yearly' ? year : period === 'monthly' ? month : t.periodAllTime;
+  const verifiedSubLabel =
+    period === 'all_time' ? t.allTimeVerified : `${activePeriodLabel} ${t.periodVerified}`;
 
   return (
     <div className="space-y-8">
@@ -114,20 +134,71 @@ export const DashboardView: React.FC<{
             {user.roles.map((r) => t.roles[r]).join(' / ')}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="month"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            className="min-h-[40px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-          />
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="inline-flex min-h-[40px] items-center rounded-lg border border-slate-200 bg-slate-100 p-1 dark:border-slate-700 dark:bg-slate-900"
+            role="group"
+            aria-label="Dashboard time period"
+          >
+            {(
+              [
+                { id: 'all_time', label: t.periodAllTime },
+                { id: 'yearly', label: t.periodYearly },
+                { id: 'monthly', label: t.periodMonthly },
+              ] as const
+            ).map((opt) => {
+              const active = period === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setPeriod(opt.id)}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap transition ${
+                    active
+                      ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {period === 'yearly' && (
+            <select
+              value={year}
+              onChange={(e) => setYear(e.target.value)}
+              aria-label="Select year"
+              className="min-h-[40px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+            >
+              {yearOptions.map((y) => (
+                <option key={y} value={y}>
+                  {y}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {period === 'monthly' && (
+            <input
+              type="month"
+              value={month}
+              onChange={(e) => setMonth(e.target.value)}
+              aria-label="Select month"
+              className="min-h-[40px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+            />
+          )}
+
           <button
             type="button"
             onClick={load}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+            disabled={loading}
+            aria-label={lang === 'ta' ? 'புதுப்பி' : 'Refresh'}
+            title={lang === 'ta' ? 'புதுப்பி' : 'Refresh'}
+            className="inline-flex h-[40px] w-[40px] items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>{t.retry}</span>
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -155,24 +226,26 @@ export const DashboardView: React.FC<{
               <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
                 <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
                   {t.inrBalance}
+                  {period !== 'all_time' ? ` (${activePeriodLabel})` : ''}
                 </div>
                 <div className="mt-2 font-mono text-2xl font-bold tabular-nums text-emerald-900 dark:text-emerald-400">
                   {formatMoney(data.balances.inrTotal, 'INR')}
                 </div>
                 <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                  Month Verified: {formatMoney(inrCollection?.total || '0', 'INR')}
+                  {verifiedSubLabel}: {formatMoney(inrCollection?.total || '0', 'INR')}
                 </div>
               </div>
 
               <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
                 <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
                   {t.aedBalance}
+                  {period !== 'all_time' ? ` (${activePeriodLabel})` : ''}
                 </div>
                 <div className="mt-2 font-mono text-2xl font-bold tabular-nums text-slate-900 dark:text-white">
                   {formatMoney(data.balances.aedTotal, 'AED')}
                 </div>
                 <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                  Month Verified: {formatMoney(aedCollection?.total || '0', 'AED')}
+                  {verifiedSubLabel}: {formatMoney(aedCollection?.total || '0', 'AED')}
                 </div>
               </div>
 
@@ -222,11 +295,13 @@ export const DashboardView: React.FC<{
               </div>
             </div>
 
-            {/* 6-Month Verified Contribution Trends */}
+            {/* Verified Contribution Trends */}
             <MonthlyContributionTrendsChart
               trends={data.communitySummary.monthlyTrends || []}
               lang={lang}
               loading={loading}
+              period={data.period || period}
+              periodLabel={period === 'yearly' ? year : period === 'monthly' ? month : undefined}
             />
 
             {/* Own Latest 5 Confirmed Contributions + Recent Dues */}
@@ -314,7 +389,7 @@ export const DashboardView: React.FC<{
               <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
                 <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
                   <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Ledger Account Balances (INR &amp; AED Separated)
+                    Ledger Account Balances · {activePeriodLabel} (INR &amp; AED Separated)
                   </h2>
                   <button
                     type="button"

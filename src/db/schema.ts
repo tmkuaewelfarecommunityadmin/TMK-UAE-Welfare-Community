@@ -58,6 +58,8 @@ export const userAccounts = pgTable('user_accounts', {
   username: text('username').notNull().unique(),
   recoveryEmail: text('recovery_email'),
   passwordHash: text('password_hash'), // scrypt salt:hash for assigned username/password login
+  avatarDataUrl: text('avatar_data_url'),
+  preferredLanguage: text('preferred_language').notNull().default('en'), // 'en' | 'ta'
   resetTokenHash: text('reset_token_hash'),
   resetTokenExpiresAt: timestamp('reset_token_expires_at', { withTimezone: true }),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
@@ -178,6 +180,7 @@ export const assistanceRequests = pgTable('assistance_requests', {
   streetTa: text('street_ta'),
   requestedAmount: numeric('requested_amount', { precision: 14, scale: 2 }).notNull(),
   currencyCode: char('currency_code', { length: 3 }).notNull().default('INR'),
+  reasonId: uuid('reason_id').references(() => assistanceReasons.id, { onDelete: 'set null' }),
   reason: text('reason').notNull(),
   requestType: text('request_type').notNull().default('normal'), // 'normal' | 'emergency'
   status: text('status').notNull().default('pending_approval'), // 'submitted' | 'pending_approval' | 'approved' | 'rejected' | 'ready_for_payout' | 'paid' | 'cancelled'
@@ -351,6 +354,49 @@ export const auditLogs = pgTable(
     index('audit_entity_idx').on(table.entityType, table.entityId),
   ]
 );
+
+// 17. Assistance Reasons (Admin-managed bilingual list with active/inactive status)
+export const assistanceReasons = pgTable('assistance_reasons', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  nameEn: text('name_en').notNull().unique(),
+  nameTa: text('name_ta').notNull(),
+  status: text('status').notNull().default('active'), // 'active' | 'inactive'
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  createdBy: uuid('created_by'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedBy: uuid('updated_by'),
+});
+
+export interface LandingHighlight {
+  id: string;
+  titleEn: string;
+  titleTa: string;
+  bodyEn: string;
+  bodyTa: string;
+}
+
+export interface LandingSlidePhoto {
+  id: string;
+  imageDataUrl: string;
+  captionEn: string;
+  captionTa: string;
+}
+
+// 18. Site & Landing Page Configuration (Admin-managed singleton)
+export const siteSettings = pgTable('site_settings', {
+  id: text('id').primaryKey(), // 'default'
+  appTitleEn: text('app_title_en').notNull().default('Village Welfare Fund'),
+  appTitleTa: text('app_title_ta').notNull().default('கிராம நல நிதி'),
+  logoDataUrl: text('logo_data_url'),
+  heroBadgeEn: text('hero_badge_en'),
+  heroBadgeTa: text('hero_badge_ta'),
+  heroSubtitleEn: text('hero_subtitle_en').notNull(),
+  heroSubtitleTa: text('hero_subtitle_ta').notNull(),
+  highlights: jsonb('highlights').$type<LandingHighlight[]>().notNull().default([]),
+  sliderPhotos: jsonb('slider_photos').$type<LandingSlidePhoto[]>().notNull().default([]),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedBy: uuid('updated_by'),
+});
 
 // Relations
 export const membersRelations = relations(members, ({ one, many }) => ({
